@@ -200,8 +200,10 @@ static int           g_lib_tab = 0;   // 0=ICE
 static int           g_next_inst_id = 1000;
 static int           g_next_conn_id = 2000;
 
-// Component mode flag (false = legacy node/link mode)
-static bool          g_comp_mode = false;
+// Component mode flag (defaults to true for Physical Library, but loading preset toggles generic)
+static bool          g_comp_mode = true;
+static bool          g_force_tab_generic = false;
+static bool          g_force_tab_component = false;
 
 // Helper: get def for a placed instance
 static const ComponentDef* GetInstDef(const CompInstance& inst) {
@@ -799,6 +801,7 @@ void UpdateHistory() {
 // --- PRESET SCENARIO LOADING (C++ DESKTOP VERSION) ---
 void LoadPreset(const std::string& key) {
     g_active_preset = key;
+    g_force_tab_generic = true;
     g_nodes.clear();
     g_links.clear();
     g_sliders.clear();
@@ -1350,18 +1353,30 @@ void RenderUI() {
     // --- PANEL 2: COMPONENT LIBRARY & TREE EXPLORER (Left) ---
     ImGui::Begin("Object Explorer", nullptr);
     {
-        // ── MODE TOGGLE ───────────────────────────────────────────────────────
-        ImGui::PushStyleColor(ImGuiCol_Text, g_comp_mode
-            ? ImVec4(0.3f,1.0f,0.5f,1.0f)
-            : ImVec4(0.7f,0.7f,0.7f,1.0f));
-        if (ImGui::Button(g_comp_mode ? "MODE: COMPONENT LIB" : "MODE: GENERIC NODES", ImVec2(-1, 0))) {
-            g_comp_mode = !g_comp_mode;
-            if (g_comp_mode)
-                Log("Switched to Physical Component Library mode.", "success");
-            else
-                Log("Switched to Generic Node/Link mode.", "info");
+        // ── MODE SELECTOR (TABS) ─────────────────────────────────────────────
+        if (ImGui::BeginTabBar("ModeTabBar", ImGuiTabBarFlags_None)) {
+            ImGuiTabItemFlags fComp = g_force_tab_component ? ImGuiTabItemFlags_SetSelected : 0;
+            ImGuiTabItemFlags fGen  = g_force_tab_generic ? ImGuiTabItemFlags_SetSelected : 0;
+            if (g_force_tab_component) g_force_tab_component = false;
+            if (g_force_tab_generic)   g_force_tab_generic = false;
+
+            if (ImGui::BeginTabItem("Physical Library", nullptr, fComp)) {
+                if (!g_comp_mode) {
+                    g_comp_mode = true;
+                    Log("Switched to Physical Component Library mode.", "success");
+                }
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Generic Node/Link", nullptr, fGen)) {
+                if (g_comp_mode) {
+                    g_comp_mode = false;
+                    Log("Switched to Generic Node/Link mode.", "info");
+                }
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
         }
-        ImGui::PopStyleColor();
+        ImGui::Spacing();
         ImGui::Separator();
 
         if (g_comp_mode) {
