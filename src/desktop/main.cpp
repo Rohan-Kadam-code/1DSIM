@@ -13,6 +13,7 @@
 #include <commdlg.h>
 
 #include "../core/solver.h"
+#include "sim_elements.h"
 #include "component_library.h"
 #include "../../thirdparty/imgui/imgui.h"
 #include "../../thirdparty/imgui/imgui_internal.h"
@@ -27,8 +28,8 @@ struct PortPos {
     char name;
     ImVec2 pos;
 };
-std::vector<PortPos> GetPortPositions(const DesktopNode& node);
-PortPos GetClosestPort(const DesktopNode& nodeThis, const DesktopNode& nodeOther);
+std::vector<PortPos> GetPortPositions(std::shared_ptr<DesktopNode> node);
+PortPos GetClosestPort(std::shared_ptr<DesktopNode> nodeThis, std::shared_ptr<DesktopNode> nodeOther);
 std::vector<ImVec2> ComputeOrthogonalRoute(ImVec2 portA, char faceA, ImVec2 portB, char faceB);
 
 void clearWorkspace();
@@ -62,47 +63,19 @@ void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // --- SIMULATION DATA STRUCTURES FOR DESKTOP ---
-struct DesktopNode {
-    int id;
-    std::string name;
-    float x;
-    float y;
-    double temp;       // in Celsius
-    double capacity;   // J/K
-    double q_gen;      // W
-    bool is_fixed;
-    double temp_init = 25.0; // Initial temperature tracker
-    double c_a1 = 0.0;
-    double c_a2 = 0.0;
-    std::string material = "Custom";
-    double mass = 1.0; // kg
-    int domain = 0; // 0: Solid, 1: Fluid
-    std::string fluid_medium = "Water";
-    double fluid_volume = 1.0; // Liters
-    double fluid_mix_ratio = 0.5; // 0.0–1.0 glycol fraction
-    double fluid_rho_a0 = 1000.0;
-    double fluid_rho_a1 = 0.0;
-    double fluid_rho_a2 = 0.0;
-    double fluid_cp_a0 = 4184.0;
-    double fluid_cp_a1 = 0.0;
-    double fluid_cp_a2 = 0.0;
-};
+// DesktopNode and DesktopLink moved to sim_elements.h
 
-struct DesktopLink {
-    int id;
-    int node_a;
-    int node_b;
-    int type;          // 0:Cond, 1:Conv, 2:Rad, 3:Flow, 4:Fan
-    double p1;         // Parameter
-    double p2;         // Direction indicator / v_max
-    double g_a1 = 0.0;
-    double g_a2 = 0.0;
-    double fan_area = 0.005;
-};
 
 struct ModelState {
-    std::vector<DesktopNode> nodes;
-    std::vector<DesktopLink> links;
+    std::vector<std::shared_ptr<DesktopNode>> nodes;
+    std::vector<std::shared_ptr<DesktopLink>> links;
+
+    ModelState Clone() const {
+        ModelState copy;
+        for (auto& n : nodes) copy.nodes.push_back(n->clone());
+        for (auto& l : links) copy.links.push_back(l->clone());
+        return copy;
+    }
 };
 
 struct SliderConfig {
@@ -125,11 +98,11 @@ struct LogLine {
 };
 
 // Global application state
-static std::vector<DesktopNode> g_nodes;
-static std::vector<DesktopLink> g_links;
+static std::vector<std::shared_ptr<DesktopNode>> g_nodes;
+static std::vector<std::shared_ptr<DesktopLink>> g_links;
 static ThermalSystem            g_solver;
-static DesktopNode*             g_selected_node = nullptr;
-static DesktopLink*             g_selected_link = nullptr;
+static std::shared_ptr<DesktopNode> g_selected_node = nullptr;
+static std::shared_ptr<DesktopLink> g_selected_link = nullptr;
 static std::string              g_active_preset = "vehicle";
 
 static std::vector<ModelState> g_undo_stack;
@@ -162,11 +135,12 @@ static std::vector<SliderConfig> g_sliders;
 static ImVec2                   g_canvas_scrolling = ImVec2(0.0f, 0.0f);
 static float                    g_canvas_zoom = 1.0f;
 static int                      g_current_tool = 0; // 0: Select, 1: Add Link
-static DesktopNode*             g_linking_start_node = nullptr;
+static std::shared_ptr<DesktopNode> g_linking_start_node = nullptr;
+static int                      g_pending_link_type = 0; // 0:Cond, 1:Conv, 2:Rad, 3:Flow, 4:Fan
 static ImVec2                   g_temp_mouse_pos;
 
 static bool                     isDragging = false;
-static DesktopNode*             dragNode = nullptr;
+static std::shared_ptr<DesktopNode> dragNode = nullptr;
 static ImVec2                   dragOffset;
 
 // Modal creation helper
@@ -178,10 +152,7 @@ static int                      g_modal_node_a_id = -1;
 static int                      g_modal_node_b_id = -1;
 
 // ─── COMPONENT LIBRARY STATE ─────────────────────────────────────────────────
-static std::vector<CompInstance>    g_comp_instances;   // placed components
-static std::vector<CompConnection>  g_comp_connections; // wired connections
-static CompInstance*                g_sel_comp = nullptr;  // selected component
-static CompConnection*              g_sel_conn = nullptr;  // selected connection
+// Legacy globals removed
 
 // Component canvas tool state (tool 2 = Place Component)
 static std::string   g_pending_comp_type = "";   // defId being dragged from palette
@@ -201,25 +172,23 @@ static int           g_next_inst_id = 1000;
 static int           g_next_conn_id = 2000;
 
 // Component mode flag (defaults to true for Physical Library, but loading preset toggles generic)
-static bool          g_comp_mode = true;
+static bool g_comp_mode = false;
 static bool          g_force_tab_generic = false;
 static bool          g_force_tab_component = false;
 
 // Helper: get def for a placed instance
-static const ComponentDef* GetInstDef(const CompInstance& inst) {
-    return GetCompDefById(inst.defId);
-}
 
 static bool g_reset_dockspace = false;
 
 // Safely resolve selection and drag pointers after vectors are modified/reallocated
+
 static void ResolvePointers() {
     if (g_selected_node != nullptr) {
         int targetId = g_selected_node->id;
-        DesktopNode* foundNode = nullptr;
+        std::shared_ptr<DesktopNode> foundNode = nullptr;
         for (auto& n : g_nodes) {
-            if (n.id == targetId) {
-                foundNode = &n;
+            if (n->id == targetId) {
+                foundNode = n;
                 break;
             }
         }
@@ -227,10 +196,10 @@ static void ResolvePointers() {
     }
     if (dragNode != nullptr) {
         int targetId = dragNode->id;
-        DesktopNode* foundNode = nullptr;
+        std::shared_ptr<DesktopNode> foundNode = nullptr;
         for (auto& n : g_nodes) {
-            if (n.id == targetId) {
-                foundNode = &n;
+            if (n->id == targetId) {
+                foundNode = n;
                 break;
             }
         }
@@ -238,10 +207,10 @@ static void ResolvePointers() {
     }
     if (g_linking_start_node != nullptr) {
         int targetId = g_linking_start_node->id;
-        DesktopNode* foundNode = nullptr;
+        std::shared_ptr<DesktopNode> foundNode = nullptr;
         for (auto& n : g_nodes) {
-            if (n.id == targetId) {
-                foundNode = &n;
+            if (n->id == targetId) {
+                foundNode = n;
                 break;
             }
         }
@@ -249,171 +218,103 @@ static void ResolvePointers() {
     }
     if (g_selected_link != nullptr) {
         int targetId = g_selected_link->id;
-        DesktopLink* foundLink = nullptr;
+        std::shared_ptr<DesktopLink> foundLink = nullptr;
         for (auto& l : g_links) {
-            if (l.id == targetId) {
-                foundLink = &l;
+            if (l->id == targetId) {
+                foundLink = l;
                 break;
             }
         }
         g_selected_link = foundLink;
     }
-    if (g_sel_comp != nullptr) {
-        int targetId = g_sel_comp->instId;
-        CompInstance* foundComp = nullptr;
-        for (auto& inst : g_comp_instances) {
-            if (inst.instId == targetId) {
-                foundComp = &inst;
-                break;
-            }
-        }
-        g_sel_comp = foundComp;
-    }
-    if (g_sel_conn != nullptr) {
-        int targetId = g_sel_conn->connId;
-        CompConnection* foundConn = nullptr;
-        for (auto& conn : g_comp_connections) {
-            if (conn.connId == targetId) {
-                foundConn = &conn;
-                break;
-            }
-        }
-        g_sel_conn = foundConn;
-    }
 }
 
 // Synchronise selection between components and generic nodes
+
 static void SyncSelection() {
     ResolvePointers();
-    if (g_comp_mode) {
-        if (g_sel_comp != nullptr) {
-            if (!g_sel_comp->solverNodeIds.empty()) {
-                int firstNodeId = g_sel_comp->solverNodeIds[0];
-                bool found = false;
-                for (auto& n : g_nodes) {
-                    if (n.id == firstNodeId) {
-                        g_selected_node = &n;
-                        g_selected_link = nullptr;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) g_selected_node = nullptr;
-            } else {
-                g_selected_node = nullptr;
-            }
-        } else {
-            g_selected_node = nullptr;
-        }
-    } else {
-        if (g_selected_node != nullptr) {
-            bool found = false;
-            for (auto& inst : g_comp_instances) {
-                for (int nid : inst.solverNodeIds) {
-                    if (nid == g_selected_node->id) {
-                        g_sel_comp = &inst;
-                        g_sel_conn = nullptr;
-                        found = true;
-                        break;
-                    }
-                }
-                if (found) break;
-            }
-            if (!found) g_sel_comp = nullptr;
-        } else {
-            g_sel_comp = nullptr;
-        }
-    }
 }
 
 // Compile component graph and sync solver
+
 static void SyncComponentsWithSolver() {
-    if (!g_comp_mode) return;
-    const auto& lib = GetComponentLibrary();
-    std::vector<DesktopNode> newNodes;
-    std::vector<DesktopLink> newLinks;
-    CompileComponentGraph(g_comp_instances, g_comp_connections, lib, newNodes, newLinks);
-    g_nodes = newNodes;
-    g_links = newLinks;
     ResolvePointers();
     SyncSystemWithSolver();
     ResetHistory();
 }
 
 // Place a component instance at canvas position
+
 static void PlaceComponent(const std::string& defId, float cx, float cy) {
-    const ComponentDef* def = GetCompDefById(defId);
-    if (!def) return;
     PushUndoState();
-    CompInstance inst;
-    inst.instId   = g_next_inst_id++;
-    inst.type     = def->type;
-    inst.defId    = defId;
-    inst.x        = cx;
-    inst.y        = cy;
-    inst.selected = false;
-    // Populate default params
-    for (const auto& p : def->params)
-        inst.params[p.key] = p.defaultValue;
-    // Initialise temp vector
-    inst.nodeTemps.resize(def->nodes.size(), 25.0);
-    g_comp_instances.push_back(inst);
+    if (defId == "engine_block") {
+        auto node = std::make_shared<EngineBlockNode>();
+        node->id = g_nodes.empty() ? 100 : (*std::max_element(g_nodes.begin(), g_nodes.end(), [](auto& a, auto& b){ return a->id < b->id; }))->id + 100;
+        node->x = cx; node->y = cy;
+        node->jacketNode->id = node->id + 1;
+        node->internalCond->id = node->id + 2;
+        node->internalCond->node_a = node->id;
+        node->internalCond->node_b = node->jacketNode->id;
+        node->capacity = node->params["block_capacity"];
+        node->q_gen = node->params["heat_rejection"];
+        node->jacketNode->fluid_volume = node->params["jacket_volume"];
+        node->internalCond->p1 = node->params["block_jacket_cond"];
+        g_nodes.push_back(node);
+    } else if (defId == "radiator") {
+        auto node = std::make_shared<RadiatorNode>();
+        node->id = g_nodes.empty() ? 100 : (*std::max_element(g_nodes.begin(), g_nodes.end(), [](auto& a, auto& b){ return a->id < b->id; }))->id + 100;
+        node->x = cx; node->y = cy;
+        node->coreNode->id = node->id + 1;
+        node->internalConv->id = node->id + 2;
+        node->internalConv->node_a = node->id;
+        node->internalConv->node_b = node->coreNode->id;
+        node->fluid_volume = node->params["coolant_volume"];
+        node->coreNode->capacity = node->params["core_capacity"];
+        node->internalConv->p1 = node->params["coolant_hA"];
+        g_nodes.push_back(node);
+    } else if (defId == "ambient_air") {
+        auto node = std::make_shared<AmbientAirNode>();
+        node->id = g_nodes.empty() ? 100 : (*std::max_element(g_nodes.begin(), g_nodes.end(), [](auto& a, auto& b){ return a->id < b->id; }))->id + 100;
+        node->x = cx; node->y = cy;
+        node->temp = node->params["temp_c"];
+        g_nodes.push_back(node);
+    } else if (defId == "generic_mass") {
+        auto node = std::make_shared<DesktopNode>();
+        node->id = g_nodes.empty() ? 100 : (*std::max_element(g_nodes.begin(), g_nodes.end(), [](auto& a, auto& b){ return a->id < b->id; }))->id + 100;
+        node->x = cx; node->y = cy;
+        node->name = "Mass";
+        node->capacity = 1000.0;
+        node->is_fixed = false;
+        g_nodes.push_back(node);
+        Log("Placed Thermal Mass node", "info");
+    } else if (defId == "generic_boundary") {
+        auto node = std::make_shared<DesktopNode>();
+        node->id = g_nodes.empty() ? 100 : (*std::max_element(g_nodes.begin(), g_nodes.end(), [](auto& a, auto& b){ return a->id < b->id; }))->id + 100;
+        node->x = cx; node->y = cy;
+        node->name = "Boundary";
+        node->temp = 25.0;
+        node->is_fixed = true;
+        g_nodes.push_back(node);
+        Log("Placed Fixed Boundary node", "info");
+    } else {
+        const ComponentDef* def = GetCompDefById(defId);
+        if (def) {
+            auto node = std::make_shared<DesktopNode>();
+            node->id = g_nodes.empty() ? 100 : (*std::max_element(g_nodes.begin(), g_nodes.end(), [](auto& a, auto& b){ return a->id < b->id; }))->id + 100;
+            node->x = cx; node->y = cy;
+            node->name = def->name;
+            g_nodes.push_back(node);
+            Log("Placed generic wrapper for " + def->name, "info");
+        }
+    }
     SyncComponentsWithSolver();
-    Log("Placed component: " + def->name, "success");
 }
 
 // Draw all component instances on the canvas
-static void DrawComponentInstances(ImDrawList* dl, ImVec2 canvas_pos) {
-    const auto& lib = GetComponentLibrary();
-    for (auto& inst : g_comp_instances) {
-        const ComponentDef* def = GetInstDef(inst);
-        if (!def) continue;
-        ImVec2 screenC = CanvasToScreen(ImVec2(inst.x, inst.y), canvas_pos);
-        def->drawSymbol(dl, screenC, g_canvas_zoom, inst.selected, g_is_running, inst.nodeTemps);
-        DrawPorts(dl, *def, screenC, g_canvas_zoom, inst.selected,
-                  (g_hovered_port_inst == inst.instId) ? g_hovered_port_id : "");
-    }
-}
+static void DrawComponentInstances(ImDrawList* dl, ImVec2 canvas_origin, float zoom) {}
 
 // Draw component connections
-static void DrawComponentConnections(ImDrawList* dl, ImVec2 canvas_pos) {
-    for (const auto& conn : g_comp_connections) {
-        CompInstance* fromInst = nullptr;
-        CompInstance* toInst   = nullptr;
-        for (auto& inst : g_comp_instances) {
-            if (inst.instId == conn.fromInstId) fromInst = &inst;
-            if (inst.instId == conn.toInstId)   toInst   = &inst;
-        }
-        if (!fromInst || !toInst) continue;
-        const ComponentDef* fd = GetInstDef(*fromInst);
-        const ComponentDef* td = GetInstDef(*toInst);
-        if (!fd || !td) continue;
-
-        ImVec2 pA = GetPortWorldPos(*fromInst, *fd, conn.fromPortId, canvas_pos, g_canvas_zoom, g_canvas_scrolling);
-        ImVec2 pB = GetPortWorldPos(*toInst,   *td, conn.toPortId,   canvas_pos, g_canvas_zoom, g_canvas_scrolling);
-
-        ImU32 lineCol = PortTypeColor(conn.portType);
-        bool sel = (g_sel_conn == &conn);
-        // Orthogonal routing
-        float mx = 0.5f*(pA.x + pB.x);
-        dl->AddLine(pA, ImVec2(mx, pA.y), lineCol, sel ? 3.0f : 2.0f);
-        dl->AddLine(ImVec2(mx, pA.y), ImVec2(mx, pB.y), lineCol, sel ? 3.0f : 2.0f);
-        dl->AddLine(ImVec2(mx, pB.y), pB, lineCol, sel ? 3.0f : 2.0f);
-
-        // Flow chevron
-        if (g_is_running) {
-            static float connPhase = 0.0f;
-            connPhase += 0.015f;
-            float t = fmodf(connPhase, 1.0f);
-            ImVec2 pt(
-                pA.x + (pB.x - pA.x) * t,
-                pA.y + (pB.y - pA.y) * t
-            );
-            float sz = 5.0f;
-            dl->AddCircleFilled(pt, sz, lineCol);
-        }
-    }
-}
+static void DrawComponentConnections(ImDrawList* dl, ImVec2 canvas_origin, float zoom) {}
 
 // Canvas coordinate helper functions
 ImVec2 CanvasToScreen(ImVec2 local_pos, ImVec2 canvas_origin) {
@@ -431,13 +332,13 @@ ImVec2 ScreenToCanvas(ImVec2 screen_pos, ImVec2 canvas_origin) {
 }
 
 // Canvas Node/Link Hit helpers
-DesktopNode* getNodeAt(ImVec2 pos) {
-    const float w = 70.0f;
-    const float h = 40.0f;
+std::shared_ptr<DesktopNode> getNodeAt(ImVec2 pos) {
     for (auto& n : g_nodes) {
-        if (pos.x >= n.x - w / 2.0f && pos.x <= n.x + w / 2.0f &&
-            pos.y >= n.y - h / 2.0f && pos.y <= n.y + h / 2.0f) {
-            return &n;
+        float w, h;
+        n->GetBounds(w, h);
+        if (pos.x >= n->x - w / 2.0f && pos.x <= n->x + w / 2.0f &&
+            pos.y >= n->y - h / 2.0f && pos.y <= n->y + h / 2.0f) {
+            return n;
         }
     }
     return nullptr;
@@ -451,10 +352,10 @@ float getDistanceToSegment(ImVec2 p, ImVec2 a, ImVec2 b) {
     return std::hypot(p.x - (a.x + t * (b.x - a.x)), p.y - (a.y + t * (b.y - a.y)));
 }
 
-DesktopLink* getLinkAt(ImVec2 pos) {
+std::shared_ptr<DesktopLink> getLinkAt(ImVec2 pos) {
     for (auto& l : g_links) {
-        auto itA = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == l.node_a; });
-        auto itB = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == l.node_b; });
+        auto itA = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == l->node_a; });
+        auto itB = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == l->node_b; });
         if (itA == g_nodes.end() || itB == g_nodes.end()) continue;
         
         PortPos portA = GetClosestPort(*itA, *itB);
@@ -471,7 +372,7 @@ DesktopLink* getLinkAt(ImVec2 pos) {
         }
         
         if (minDist <= 10.0f / g_canvas_zoom) {
-            return &l;
+            return l;
         }
     }
     return nullptr;
@@ -514,23 +415,23 @@ static const std::vector<MaterialData> g_materials = {
     { "Silicon", 2330.0, 700.0, 0.3, 0.0 }
 };
 
-void UpdateNodeCapacityFromMaterial(DesktopNode& node) {
-    if (node.material == "Custom") return;
+void UpdateNodeCapacityFromMaterial(const std::shared_ptr<DesktopNode>& node) {
+    if (node->material == "Custom") return;
     for (const auto& mat : g_materials) {
-        if (mat.name == node.material) {
-            node.capacity = node.mass * mat.cp0;
-            node.c_a1 = node.mass * mat.cp1;
-            node.c_a2 = node.mass * mat.cp2;
+        if (mat.name == node->material) {
+            node->capacity = node->mass * mat.cp0;
+            node->c_a1 = node->mass * mat.cp1;
+            node->c_a2 = node->mass * mat.cp2;
             break;
         }
     }
 }
 
-void GetDesktopNodeProperties(const DesktopNode& node, double& cap, double& ca1, double& ca2) {
-    if (node.domain == 1) { // Fluid
-        double T_c = node.temp;
+void GetDesktopNodeProperties(const std::shared_ptr<DesktopNode>& node, double& cap, double& ca1, double& ca2) {
+    if (node->domain == 1) { // Fluid
+        double T_c = node->temp;
         double rho = 0.0, drho = 0.0, cp = 0.0, dcp = 0.0;
-        std::string medium = node.fluid_medium;
+        std::string medium = node->fluid_medium;
         if (medium == "Water") {
             rho = 1000.0 - 0.0178 * T_c - 0.00557 * T_c * T_c + 0.000027 * T_c * T_c * T_c;
             drho = -0.0178 - 0.01114 * T_c + 0.000081 * T_c * T_c;
@@ -554,7 +455,7 @@ void GetDesktopNodeProperties(const DesktopNode& node, double& cap, double& ca1,
             cp = 1005.0 + 0.05 * T_c;
             dcp = 0.05;
         } else if (medium == "Mixture") {
-            double r = node.fluid_mix_ratio;
+            double r = node->fluid_mix_ratio;
             double ir = 1.0 - r;
             // Water properties
             double rho_w = 1000.0 - 0.0178 * T_c - 0.00557 * T_c * T_c + 0.000027 * T_c * T_c * T_c;
@@ -573,44 +474,52 @@ void GetDesktopNodeProperties(const DesktopNode& node, double& cap, double& ca1,
             cp = ir * cp_w + r * cp_g;
             dcp = ir * dcp_w + r * dcp_g;
         } else if (medium == "Custom") {
-            rho = node.fluid_rho_a0 + node.fluid_rho_a1 * T_c + node.fluid_rho_a2 * T_c * T_c;
-            drho = node.fluid_rho_a1 + 2.0 * node.fluid_rho_a2 * T_c;
-            cp = node.fluid_cp_a0 + node.fluid_cp_a1 * T_c + node.fluid_cp_a2 * T_c * T_c;
-            dcp = node.fluid_cp_a1 + 2.0 * node.fluid_cp_a2 * T_c;
+            rho = node->fluid_rho_a0 + node->fluid_rho_a1 * T_c + node->fluid_rho_a2 * T_c * T_c;
+            drho = node->fluid_rho_a1 + 2.0 * node->fluid_rho_a2 * T_c;
+            cp = node->fluid_cp_a0 + node->fluid_cp_a1 * T_c + node->fluid_cp_a2 * T_c * T_c;
+            dcp = node->fluid_cp_a1 + 2.0 * node->fluid_cp_a2 * T_c;
         } else {
             rho = 1000.0; drho = 0.0; cp = 4184.0; dcp = 0.0;
         }
-        double V_m3 = node.fluid_volume * 1e-3;
+        double V_m3 = node->fluid_volume * 1e-3;
         cap = rho * V_m3 * cp;
         ca1 = V_m3 * (rho * dcp + cp * drho);
         ca2 = 0.0;
     } else { // Solid
-        cap = node.capacity;
-        ca1 = node.c_a1;
-        ca2 = node.c_a2;
+        cap = node->capacity;
+        ca1 = node->c_a1;
+        ca2 = node->c_a2;
     }
 }
 
 // --- PORT CALCULATIONS ---
 
-std::vector<PortPos> GetPortPositions(const DesktopNode& node) {
-    const float w = 70.0f;
-    const float h = 40.0f;
-    std::vector<PortPos> ports = {
-        { 'T', ImVec2(node.x, node.y - h / 2.0f) }, // Top
-        { 'B', ImVec2(node.x, node.y + h / 2.0f) }, // Bottom
-        { 'L', ImVec2(node.x - w / 2.0f, node.y) }, // Left
-        { 'R', ImVec2(node.x + w / 2.0f, node.y) }  // Right
-    };
+std::vector<PortPos> GetPortPositions(std::shared_ptr<DesktopNode> node) {
+    std::vector<PortPos> ports;
+    auto nodePorts = node->GetPorts();
+    if (!nodePorts.empty()) {
+        for (const auto& p : nodePorts) {
+            ports.push_back({ p.face, ImVec2(node->x + p.dx, node->y + p.dy) });
+        }
+    } else {
+        const float w = 70.0f;
+        const float h = 40.0f;
+        ports = {
+            { 'T', ImVec2(node->x, node->y - h / 2.0f) }, // Top
+            { 'B', ImVec2(node->x, node->y + h / 2.0f) }, // Bottom
+            { 'L', ImVec2(node->x - w / 2.0f, node->y) }, // Left
+            { 'R', ImVec2(node->x + w / 2.0f, node->y) }  // Right
+        };
+    }
     return ports;
 }
 
-PortPos GetClosestPort(const DesktopNode& nodeThis, const DesktopNode& nodeOther) {
+PortPos GetClosestPort(std::shared_ptr<DesktopNode> nodeThis, std::shared_ptr<DesktopNode> nodeOther) {
     auto ports = GetPortPositions(nodeThis);
     PortPos bestPort = ports[0];
     float minDist = 1e9f;
     for (const auto& p : ports) {
-        float dist = std::hypot(p.pos.x - nodeOther.x, p.pos.y - nodeOther.y);
+        float dist = std::hypot(p.pos.x - nodeOther->x, p.pos.y - nodeOther->y);
         if (dist < minDist) {
             minDist = dist;
             bestPort = p;
@@ -723,14 +632,25 @@ std::vector<ImVec2> ComputeOrthogonalRoute(ImVec2 portA, char faceA, ImVec2 port
 // Re-initialize solver model from local vector list
 void SyncSystemWithSolver() {
     g_solver.clear();
-    for (const auto& n : g_nodes) {
-        g_solver.add_node(n.id, n.name.c_str(), cToK(n.temp), n.capacity, n.q_gen, n.is_fixed, n.c_a1, n.c_a2, n.domain, n.fluid_medium.c_str(), n.fluid_volume);
-        if (n.domain == 1) {
-            g_solver.set_node_fluid_params(n.id, n.fluid_mix_ratio, n.fluid_rho_a0, n.fluid_rho_a1, n.fluid_rho_a2, n.fluid_cp_a0, n.fluid_cp_a1, n.fluid_cp_a2);
+    for (const auto& top_n : g_nodes) {
+        for (auto* n : top_n->GetSolverNodes()) {
+            g_solver.add_node(n->id, n->name.c_str(), cToK(n->temp), n->capacity, n->q_gen, n->is_fixed, n->c_a1, n->c_a2, n->domain, n->fluid_medium.c_str(), n->fluid_volume);
+            if (n->domain == 1) {
+                g_solver.set_node_fluid_params(n->id, n->fluid_mix_ratio, n->fluid_rho_a0, n->fluid_rho_a1, n->fluid_rho_a2, n->fluid_cp_a0, n->fluid_cp_a1, n->fluid_cp_a2);
+            }
         }
     }
     for (const auto& l : g_links) {
-        g_solver.add_link(l.id, l.node_a, l.node_b, l.type, l.p1, l.p2, l.g_a1, l.g_a2, l.fan_area);
+        auto itA = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == l->node_a; });
+        auto itB = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == l->node_b; });
+        int nodeA_resolved = (itA != g_nodes.end()) ? (*itA)->ResolveSolverNodeId(l->type, true) : l->node_a;
+        int nodeB_resolved = (itB != g_nodes.end()) ? (*itB)->ResolveSolverNodeId(l->type, false) : l->node_b;
+        g_solver.add_link(l->id, nodeA_resolved, nodeB_resolved, l->type, l->p1, l->p2, l->g_a1, l->g_a2, l->fan_area);
+    }
+    for (const auto& top_n : g_nodes) {
+        for (const auto& l : top_n->GetInternalLinks()) {
+            g_solver.add_link(l->id, l->node_a, l->node_b, l->type, l->p1, l->p2, l->g_a1, l->g_a2, l->fan_area);
+        }
     }
 }
 
@@ -742,52 +662,52 @@ void ResetHistory() {
     // Add initial points
     g_time_history.push_back(g_sim_time);
     for (const auto& n : g_nodes) {
-        g_temp_history[n.id].push_back(n.temp);
+        g_temp_history[n->id].push_back(n->temp);
     }
 }
 
 void SyncSlidersFromSystem() {
     for (auto& slide : g_sliders) {
         if (slide.target_type == "node") {
-            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == slide.target_id; });
+            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == slide.target_id; });
             if (it != g_nodes.end()) {
                 if (slide.field == "temp") {
-                    slide.value = (float)it->temp;
+                    slide.value = (float)(*it)->temp;
                 }
                 else if (slide.field == "q_gen") {
-                    slide.value = (float)it->q_gen;
+                    slide.value = (float)(*it)->q_gen;
                 }
             }
         }
         else if (slide.target_type == "node_kw") {
-            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == slide.target_id; });
+            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == slide.target_id; });
             if (it != g_nodes.end()) {
                 if (slide.field == "q_gen") {
-                    slide.value = (float)(it->q_gen / 1000.0);
+                    slide.value = (float)((*it)->q_gen / 1000.0);
                 }
             }
         }
         else if (slide.target_type == "nodes_all_q") {
             if (!slide.target_ids.empty()) {
-                auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == slide.target_ids[0]; });
+                auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == slide.target_ids[0]; });
                 if (it != g_nodes.end()) {
-                    slide.value = (float)it->q_gen;
+                    slide.value = (float)(*it)->q_gen;
                 }
             }
         }
         else if (slide.target_type == "link") {
-            auto it = std::find_if(g_links.begin(), g_links.end(), [&](const DesktopLink& l) { return l.id == slide.target_id; });
+            auto it = std::find_if(g_links.begin(), g_links.end(), [&](const std::shared_ptr<DesktopLink>& l) { return l->id == slide.target_id; });
             if (it != g_links.end()) {
                 if (slide.field == "p1") {
-                    slide.value = (float)it->p1;
+                    slide.value = (float)(*it)->p1;
                 }
             }
         }
         else if (slide.target_type == "links_all_flow") {
             if (!slide.target_ids.empty()) {
-                auto it = std::find_if(g_links.begin(), g_links.end(), [&](const DesktopLink& l) { return l.id == slide.target_ids[0]; });
+                auto it = std::find_if(g_links.begin(), g_links.end(), [&](const std::shared_ptr<DesktopLink>& l) { return l->id == slide.target_ids[0]; });
                 if (it != g_links.end()) {
-                    slide.value = (float)it->p1;
+                    slide.value = (float)(*it)->p1;
                 }
             }
         }
@@ -797,46 +717,46 @@ void SyncSlidersFromSystem() {
 void ApplySlidersToSystem() {
     for (const auto& slide : g_sliders) {
         if (slide.target_type == "node") {
-            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == slide.target_id; });
+            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == slide.target_id; });
             if (it != g_nodes.end()) {
                 if (slide.field == "temp") {
-                    it->temp = slide.value;
-                    it->temp_init = slide.value;
+                    (*it)->temp = slide.value;
+                    (*it)->temp_init = slide.value;
                 }
                 else if (slide.field == "q_gen") {
-                    it->q_gen = slide.value;
+                    (*it)->q_gen = slide.value;
                 }
             }
         }
         else if (slide.target_type == "node_kw") {
-            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == slide.target_id; });
+            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == slide.target_id; });
             if (it != g_nodes.end()) {
                 if (slide.field == "q_gen") {
-                    it->q_gen = slide.value * 1000.0; // kW to W
+                    (*it)->q_gen = slide.value * 1000.0; // kW to W
                 }
             }
         }
         else if (slide.target_type == "nodes_all_q") {
             for (int tid : slide.target_ids) {
-                auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == tid; });
+                auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == tid; });
                 if (it != g_nodes.end()) {
-                    it->q_gen = slide.value;
+                    (*it)->q_gen = slide.value;
                 }
             }
         }
         else if (slide.target_type == "link") {
-            auto it = std::find_if(g_links.begin(), g_links.end(), [&](const DesktopLink& l) { return l.id == slide.target_id; });
+            auto it = std::find_if(g_links.begin(), g_links.end(), [&](const std::shared_ptr<DesktopLink>& l) { return l->id == slide.target_id; });
             if (it != g_links.end()) {
                 if (slide.field == "p1") {
-                    it->p1 = slide.value;
+                    (*it)->p1 = slide.value;
                 }
             }
         }
         else if (slide.target_type == "links_all_flow") {
             for (int tid : slide.target_ids) {
-                auto it = std::find_if(g_links.begin(), g_links.end(), [&](const DesktopLink& l) { return l.id == tid; });
+                auto it = std::find_if(g_links.begin(), g_links.end(), [&](const std::shared_ptr<DesktopLink>& l) { return l->id == tid; });
                 if (it != g_links.end()) {
-                    it->p1 = slide.value;
+                    (*it)->p1 = slide.value;
                 }
             }
         }
@@ -902,7 +822,7 @@ void Redo() {
 void UpdateHistory() {
     g_time_history.push_back(g_sim_time);
     for (const auto& n : g_nodes) {
-        g_temp_history[n.id].push_back(n.temp);
+        g_temp_history[n->id].push_back(n->temp);
     }
     
     // Cap plot points
@@ -924,10 +844,6 @@ void LoadPreset(const std::string& key) {
     g_sliders.clear();
     g_selected_node = nullptr;
     g_selected_link = nullptr;
-    g_comp_instances.clear();
-    g_comp_connections.clear();
-    g_sel_comp = nullptr;
-    g_sel_conn = nullptr;
     g_sim_time = 0.0;
     g_is_running = false;
     g_undo_stack.clear();
@@ -936,47 +852,108 @@ void LoadPreset(const std::string& key) {
     g_canvas_scrolling = ImVec2(0.0f, 0.0f);
     
     if (key == "vehicle") {
-        g_nodes = {
-            { 1, "Engine Block", 180.0f, 100.0f, 40.0, 50000.0, 15000.0, false },
-            { 2, "Engine Jacket", 180.0f, 260.0f, 30.0, 4000.0, 0.0, false },
-            { 3, "Radiator Coolant", 500.0f, 260.0f, 25.0, 3000.0, 0.0, false },
-            { 4, "Radiator Core", 500.0f, 100.0f, 25.0, 8000.0, 0.0, false },
-            { 5, "Ambient Air", 680.0f, 100.0f, 30.0, 1.0, 0.0, true }
-        };
-        g_links = {
-            { 101, 1, 2, 0, 1200.0, 0.0 }, // Cond
-            { 102, 3, 4, 1, 800.0, 0.0 },  // Conv
-            { 103, 4, 5, 1, 500.0, 0.0 },  // Conv
-            { 104, 2, 3, 3, 400.0, 1.0 },  // Flow Engine->Radiator
-            { 105, 3, 2, 3, 400.0, 1.0 }   // Flow Radiator->Engine
-        };
-        
+        auto engine = std::make_shared<EngineBlockNode>();
+        engine->id = 100;
+        engine->x = 180.0f;
+        engine->y = 180.0f;
+        engine->jacketNode->id = 101;
+        engine->internalCond->id = 102;
+        engine->internalCond->node_a = 100;
+        engine->internalCond->node_b = 101;
+        engine->capacity = engine->params["block_capacity"];
+        engine->q_gen = engine->params["heat_rejection"];
+        engine->jacketNode->fluid_volume = engine->params["jacket_volume"];
+        engine->internalCond->p1 = engine->params["block_jacket_cond"];
+        g_nodes.push_back(engine);
+
+        auto radiator = std::make_shared<RadiatorNode>();
+        radiator->id = 200;
+        radiator->x = 500.0f;
+        radiator->y = 180.0f;
+        radiator->coreNode->id = 201;
+        radiator->internalConv->id = 202;
+        radiator->internalConv->node_a = 200;
+        radiator->internalConv->node_b = 201;
+        radiator->fluid_volume = radiator->params["coolant_volume"];
+        radiator->coreNode->capacity = radiator->params["core_capacity"];
+        radiator->internalConv->p1 = radiator->params["coolant_hA"];
+        g_nodes.push_back(radiator);
+
+        auto ambient = std::make_shared<AmbientAirNode>();
+        ambient->id = 300;
+        ambient->x = 680.0f;
+        ambient->y = 100.0f;
+        ambient->temp = ambient->params["temp_c"];
+        g_nodes.push_back(ambient);
+
+        auto l_flow1 = std::make_shared<DesktopLink>();
+        l_flow1->id = 104;
+        l_flow1->node_a = 100;
+        l_flow1->node_b = 200;
+        l_flow1->type = 3;
+        l_flow1->p1 = 400.0;
+        l_flow1->p2 = 1.0;
+        g_links.push_back(l_flow1);
+
+        auto l_flow2 = std::make_shared<DesktopLink>();
+        l_flow2->id = 105;
+        l_flow2->node_a = 200;
+        l_flow2->node_b = 100;
+        l_flow2->type = 3;
+        l_flow2->p1 = 400.0;
+        l_flow2->p2 = 1.0;
+        g_links.push_back(l_flow2);
+
+        auto l_conv = std::make_shared<DesktopLink>();
+        l_conv->id = 103;
+        l_conv->node_a = 200;
+        l_conv->node_b = 300;
+        l_conv->type = 1;
+        l_conv->p1 = 500.0;
+        l_conv->p2 = 0.0;
+        g_links.push_back(l_conv);
+
         g_sliders = {
-            { "engine_power", "Engine Heat Output (kW)", 0.0f, 80.0f, 15.0f, 2.0f, "node_kw", 1, {}, "q_gen" },
+            { "engine_power", "Engine Heat Output (kW)", 0.0f, 80.0f, 15.0f, 2.0f, "node_kw", 100, {}, "q_gen" },
             { "pump_speed", "Water Pump Rate (W/K)", 0.0f, 2000.0f, 400.0f, 100.0f, "links_all_flow", 0, {104, 105}, "p1" },
             { "radiator_fan", "Radiator Cooling Fan (W/K)", 50.0f, 3000.0f, 500.0f, 50.0f, "link", 103, {}, "p1" },
-            { "ambient_temp", "Ambient Environment Temp (C)", 5.0f, 48.0f, 30.0f, 1.0f, "node", 5, {}, "temp" }
+            { "ambient_temp", "Ambient Environment Temp (C)", 5.0f, 48.0f, 30.0f, 1.0f, "node", 300, {}, "temp" }
         };
     } 
     else if (key == "cpu") {
-        g_nodes = {
+        struct NodeInit { int id; std::string name; float x, y; double temp, capacity, q_gen; bool is_fixed; };
+        std::vector<NodeInit> nodes_init = {
             { 1, "CPU Die", 140.0f, 180.0f, 40.0, 150.0, 85.0, false },
             { 2, "TIM Thermal Paste", 300.0f, 180.0f, 32.0, 15.0, 0.0, false },
             { 3, "Copper Heat Sink", 460.0f, 180.0f, 28.0, 350.0, 0.0, false },
             { 4, "Chassis Air", 620.0f, 180.0f, 25.0, 1.0, 0.0, true }
         };
-        g_links = {
+        for (const auto& ni : nodes_init) {
+            auto n = std::make_shared<DesktopNode>();
+            n->id = ni.id; n->name = ni.name; n->x = ni.x; n->y = ni.y;
+            n->temp = ni.temp; n->capacity = ni.capacity; n->q_gen = ni.q_gen; n->is_fixed = ni.is_fixed;
+            n->temp_init = ni.temp;
+            g_nodes.push_back(n);
+        }
+        struct LinkInit { int id; int node_a; int node_b; int type; double p1; double p2; };
+        std::vector<LinkInit> links_init = {
             { 101, 1, 2, 0, 80.0, 0.0 },
             { 102, 2, 3, 0, 50.0, 0.0 },
             { 103, 3, 4, 1, 4.0, 0.0 }
         };
+        for (const auto& li : links_init) {
+            auto l = std::make_shared<DesktopLink>();
+            l->id = li.id; l->node_a = li.node_a; l->node_b = li.node_b; l->type = li.type; l->p1 = li.p1; l->p2 = li.p2;
+            g_links.push_back(l);
+        }
         g_sliders = {
             { "cpu_power", "CPU TDP Heat (W)", 0.0f, 200.0f, 85.0f, 5.0f, "node", 1, {}, "q_gen" },
             { "fan_speed", "Heat Sink Convection (W/K)", 0.1f, 20.0f, 4.0f, 0.5f, "link", 103, {}, "p1" }
         };
-    }
+    } 
     else if (key == "battery") {
-        g_nodes = {
+        struct NodeInit { int id; std::string name; float x, y; double temp, capacity, q_gen; bool is_fixed; };
+        std::vector<NodeInit> nodes_init = {
             { 1, "Battery Cell 1", 180.0f, 100.0f, 25.0, 600.0, 20.0, false },
             { 2, "Battery Cell 2", 300.0f, 100.0f, 25.0, 600.0, 20.0, false },
             { 3, "Battery Cell 3", 420.0f, 100.0f, 25.0, 600.0, 20.0, false },
@@ -988,7 +965,16 @@ void LoadPreset(const std::string& key) {
             { 9, "Coolant Inlet", 60.0f, 240.0f, 20.0, 1.0, 0.0, true },
             { 10, "Coolant Outlet", 660.0f, 240.0f, 20.0, 1.0, 0.0, true }
         };
-        g_links = {
+        for (const auto& ni : nodes_init) {
+            auto n = std::make_shared<DesktopNode>();
+            n->id = ni.id; n->name = ni.name; n->x = ni.x; n->y = ni.y;
+            n->temp = ni.temp; n->capacity = ni.capacity; n->q_gen = ni.q_gen; n->is_fixed = ni.is_fixed;
+            n->temp_init = ni.temp;
+            if (ni.id >= 5 && ni.id <= 8) { n->domain = 1; n->fluid_medium = "Water"; n->fluid_volume = 0.5; }
+            g_nodes.push_back(n);
+        }
+        struct LinkInit { int id; int node_a; int node_b; int type; double p1; double p2; };
+        std::vector<LinkInit> links_init = {
             { 101, 1, 2, 0, 0.8, 0.0 },
             { 102, 2, 3, 0, 0.8, 0.0 },
             { 103, 3, 4, 0, 0.8, 0.0 },
@@ -1002,26 +988,45 @@ void LoadPreset(const std::string& key) {
             { 111, 7, 8, 3, 8.0, 1.0 },
             { 112, 8, 10, 3, 8.0, 1.0 }
         };
+        for (const auto& li : links_init) {
+            auto l = std::make_shared<DesktopLink>();
+            l->id = li.id; l->node_a = li.node_a; l->node_b = li.node_b; l->type = li.type; l->p1 = li.p1; l->p2 = li.p2;
+            g_links.push_back(l);
+        }
         g_sliders = {
             { "battery_heat", "Cell Dissipation (W/cell)", 0.0f, 50.0f, 20.0f, 2.0f, "nodes_all_q", 0, {1,2,3,4}, "q_gen" },
             { "coolant_flow", "Fluid Heat Capacity Flow (W/K)", 0.5f, 25.0f, 8.0f, 0.5f, "links_all_flow", 0, {108,109,110,111,112}, "p1" },
             { "inlet_temp", "Coolant Feed Temp (C)", 5.0f, 35.0f, 20.0f, 1.0f, "node", 9, {}, "temp" }
         };
-    }
+    } 
     else if (key == "window") {
-        g_nodes = {
+        struct NodeInit { int id; std::string name; float x, y; double temp, capacity, q_gen; bool is_fixed; };
+        std::vector<NodeInit> nodes_init = {
             { 1, "Indoor Room Air", 100.0f, 180.0f, 22.0, 1.0, 0.0, true },
             { 2, "Inner Pane Glass", 260.0f, 180.0f, 16.0, 500.0, 0.0, false },
             { 3, "Gas Gap (Argon)", 420.0f, 180.0f, 8.0, 20.0, 0.0, false },
             { 4, "Outer Pane Glass", 580.0f, 180.0f, 1.0, 500.0, 0.0, false },
             { 5, "Outdoor Atmosphere", 740.0f, 180.0f, -8.0, 1.0, 0.0, true }
         };
-        g_links = {
+        for (const auto& ni : nodes_init) {
+            auto n = std::make_shared<DesktopNode>();
+            n->id = ni.id; n->name = ni.name; n->x = ni.x; n->y = ni.y;
+            n->temp = ni.temp; n->capacity = ni.capacity; n->q_gen = ni.q_gen; n->is_fixed = ni.is_fixed;
+            n->temp_init = ni.temp;
+            g_nodes.push_back(n);
+        }
+        struct LinkInit { int id; int node_a; int node_b; int type; double p1; double p2; };
+        std::vector<LinkInit> links_init = {
             { 101, 1, 2, 1, 8.0, 0.0 },
             { 102, 2, 3, 0, 3.5, 0.0 },
             { 103, 3, 4, 0, 3.5, 0.0 },
             { 104, 4, 5, 1, 30.0, 0.0 }
         };
+        for (const auto& li : links_init) {
+            auto l = std::make_shared<DesktopLink>();
+            l->id = li.id; l->node_a = li.node_a; l->node_b = li.node_b; l->type = li.type; l->p1 = li.p1; l->p2 = li.p2;
+            g_links.push_back(l);
+        }
         g_sliders = {
             { "indoor_temp", "Indoor Thermostat (C)", 16.0f, 28.0f, 22.0f, 0.5f, "node", 1, {}, "temp" },
             { "outdoor_temp", "Outdoor Temperature (C)", -35.0f, 15.0f, -8.0f, 1.0f, "node", 5, {}, "temp" },
@@ -1031,11 +1036,11 @@ void LoadPreset(const std::string& key) {
 
     g_plot_active_nodes.clear();
     for (const auto& n : g_nodes) {
-        g_plot_active_nodes[n.id] = true; // Plot visible by default
+        g_plot_active_nodes[n->id] = true;
     }
 
     for (auto& n : g_nodes) {
-        n.temp_init = n.temp;
+        n->temp_init = n->temp;
     }
 
     ApplySlidersToSystem();
@@ -1065,7 +1070,7 @@ void StepSimulation() {
 
     // Pull temperatures back
     for (auto& n : g_nodes) {
-        n.temp = kToC(g_solver.get_node_temperature(n.id));
+        n->temp = kToC(g_solver.get_node_temperature(n->id));
     }
 
     UpdateHistory();
@@ -1079,7 +1084,7 @@ void SolveSteadyState() {
     int iters = g_solver.solve_steady_state(1e-6, 2000);
     
     for (auto& n : g_nodes) {
-        n.temp = kToC(g_solver.get_node_temperature(n.id));
+        n->temp = kToC(g_solver.get_node_temperature(n->id));
     }
     
     UpdateHistory();
@@ -1102,7 +1107,7 @@ void ExportCSV() {
     // Header
     out << "Time (s)";
     for (const auto& n : g_nodes) {
-        out << "," << n.name << " (C)";
+        out << "," << n->name << " (C)";
     }
     out << "\n";
     
@@ -1110,7 +1115,7 @@ void ExportCSV() {
     for (size_t i = 0; i < g_time_history.size(); i++) {
         out << g_time_history[i];
         for (const auto& n : g_nodes) {
-            auto& temps = g_temp_history[n.id];
+            auto& temps = g_temp_history[n->id];
             if (i < temps.size()) {
                 out << "," << temps[i];
             } else {
@@ -1480,167 +1485,135 @@ void RenderUI() {
     // --- PANEL 2: COMPONENT LIBRARY & TREE EXPLORER (Left) ---
     ImGui::Begin("Object Explorer", nullptr);
     {
-        // ── MODE SELECTOR (TABS) ─────────────────────────────────────────────
-        if (ImGui::BeginTabBar("ModeTabBar", ImGuiTabBarFlags_None)) {
-            ImGuiTabItemFlags fComp = g_force_tab_component ? ImGuiTabItemFlags_SetSelected : 0;
-            ImGuiTabItemFlags fGen  = g_force_tab_generic ? ImGuiTabItemFlags_SetSelected : 0;
-            if (g_force_tab_component) g_force_tab_component = false;
-            if (g_force_tab_generic)   g_force_tab_generic = false;
+        // Unified Component Palette
+        if (ImGui::CollapsingHeader("Component Palette", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Columns(2, "palette_cols", false);
+            
+            // Physical components
+            for (const auto& def : GetComponentLibrary()) {
+                if (def.category == "ICE") {
+                    ImGui::PushID(def.id.c_str());
+                    if (ImGui::Button(def.name.c_str(), ImVec2(90.0f, 40.0f))) {
+                        g_placing_component = true;
+                        g_pending_comp_type = def.id;
+                        setTool(0);
+                    }
+                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                        ImGui::SetDragDropPayload("COMP_LIBRARY_ITEM", def.id.c_str(), def.id.size() + 1);
+                        ImGui::Text("Drop %s", def.name.c_str());
+                        ImGui::EndDragDropSource();
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", def.description.c_str());
+                    ImGui::PopID();
+                    ImGui::NextColumn();
+                }
+            }
 
-            if (ImGui::BeginTabItem("Physical Library", nullptr, fComp)) {
-                if (!g_comp_mode) {
-                    g_comp_mode = true;
-                    SyncComponentsWithSolver();
-                    SyncSelection();
-                    Log("Switched to Physical Component Library mode.", "success");
-                }
-                ImGui::EndTabItem();
+            // Generic elements
+            // Thermal Mass
+            ImGui::PushID("generic_mass");
+            if (ImGui::Button("Thermal Mass\n(Node)", ImVec2(90.0f, 40.0f))) {
+                g_placing_component = true;
+                g_pending_comp_type = "generic_mass";
+                setTool(0);
             }
-            if (ImGui::BeginTabItem("Generic Node/Link", nullptr, fGen)) {
-                if (g_comp_mode) {
-                    g_comp_mode = false;
-                    SyncSelection();
-                    Log("Switched to Generic Node/Link mode.", "info");
-                }
-                ImGui::EndTabItem();
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                ImGui::SetDragDropPayload("COMP_LIBRARY_ITEM", "generic_mass", strlen("generic_mass") + 1);
+                ImGui::Text("Drop Thermal Mass");
+                ImGui::EndDragDropSource();
             }
-            ImGui::EndTabBar();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click or drag to place a generic solid Thermal Mass node.");
+            ImGui::PopID();
+            ImGui::NextColumn();
+
+            // Fixed Boundary
+            ImGui::PushID("generic_boundary");
+            if (ImGui::Button("Fixed Bound\n(Node)", ImVec2(90.0f, 40.0f))) {
+                g_placing_component = true;
+                g_pending_comp_type = "generic_boundary";
+                setTool(0);
+            }
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                ImGui::SetDragDropPayload("COMP_LIBRARY_ITEM", "generic_boundary", strlen("generic_boundary") + 1);
+                ImGui::Text("Drop Fixed Boundary");
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click or drag to place a generic Fixed Temperature boundary node.");
+            ImGui::PopID();
+            ImGui::NextColumn();
+
+            // Conduction Link
+            ImGui::PushID("generic_conduction");
+            if (ImGui::Button("Conduction\n(Link)", ImVec2(90.0f, 40.0f))) {
+                setTool(1);
+                g_pending_link_type = 0;
+                Log("Connect Link tool active: Conduction", "info");
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click then connect two nodes to create a Conduction link.");
+            ImGui::PopID();
+            ImGui::NextColumn();
+
+            // Convection Link
+            ImGui::PushID("generic_convection");
+            if (ImGui::Button("Convection\n(Link)", ImVec2(90.0f, 40.0f))) {
+                setTool(1);
+                g_pending_link_type = 1;
+                Log("Connect Link tool active: Convection", "info");
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click then connect two nodes to create a Convection link.");
+            ImGui::PopID();
+            ImGui::NextColumn();
+
+            // Radiation Link
+            ImGui::PushID("generic_radiation");
+            if (ImGui::Button("Radiation\n(Link)", ImVec2(90.0f, 40.0f))) {
+                setTool(1);
+                g_pending_link_type = 2;
+                Log("Connect Link tool active: Radiation", "info");
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click then connect two nodes to create a Radiation link.");
+            ImGui::PopID();
+            ImGui::NextColumn();
+
+            // Flow Loop Link
+            ImGui::PushID("generic_flow");
+            if (ImGui::Button("Flow Loop\n(Link)", ImVec2(90.0f, 40.0f))) {
+                setTool(1);
+                g_pending_link_type = 3;
+                Log("Connect Link tool active: Coolant Flow", "info");
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click then connect two nodes to create a Coolant Flow link.");
+            ImGui::PopID();
+            ImGui::NextColumn();
+
+            ImGui::Columns(1);
         }
-        ImGui::Spacing();
+
         ImGui::Separator();
 
-        if (g_comp_mode) {
-            // ── ICE COMPONENT LIBRARY ─────────────────────────────────────────
-            ImGui::TextColored(ImVec4(0.9f,0.7f,0.2f,1.0f), "ICE Cooling Components");
-            ImGui::TextDisabled("Click to arm, then click on canvas to place");
-            ImGui::Spacing();
-
-            const auto& lib = GetComponentLibrary();
-            for (const auto& def : lib) {
-                if (def.category != "ICE" && def.category != "Common") continue;
-                bool armed = (g_pending_comp_type == def.id && g_placing_component);
-
-                // Colour-code button by category
-                ImVec4 btnCol  = armed ? ImVec4(0.2f,0.8f,0.4f,1.0f) : ImVec4(0.18f,0.22f,0.32f,1.0f);
-                ImVec4 portCol;
-                // Pick accent from border colour
-                ImU32 bc = def.borderColor;
-                portCol = ImVec4(((bc>>0)&0xFF)/255.0f,((bc>>8)&0xFF)/255.0f,((bc>>16)&0xFF)/255.0f,1.0f);
-
-                ImGui::PushStyleColor(ImGuiCol_Button, btnCol);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f,0.35f,0.5f,1.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, portCol);
-
-                std::string btnLabel = def.name;
-                if (ImGui::Button(btnLabel.c_str(), ImVec2(-1.0f, 32.0f))) {
-                    g_pending_comp_type = def.id;
-                    g_placing_component = true;
-                    g_current_tool = 2;   // 2 = Place Component tool
-                    Log("Armed: " + def.name + " — click on canvas to place.", "info");
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", def.description.c_str());
-
-                // Port legend inline
-                ImGui::SameLine(ImGui::GetContentRegionAvail().x - 80.0f);
-                for (const auto& p : def.ports) {
-                    ImVec4 pc;
-                    ImU32 cc = PortTypeColor(p.type);
-                    pc = ImVec4(((cc>>0)&0xFF)/255.0f,((cc>>8)&0xFF)/255.0f,((cc>>16)&0xFF)/255.0f,1.0f);
-                    ImGui::PushStyleColor(ImGuiCol_Text, pc);
-                    ImGui::Text("o");
-                    ImGui::PopStyleColor();
-                    ImGui::SameLine();
-                }
-                ImGui::NewLine();
-
-                ImGui::PopStyleColor(3);
-                ImGui::Spacing();
-            }
-
-            ImGui::Separator();
-            if (ImGui::Button("Connect Ports", ImVec2(-1,0))) {
-                g_current_tool = 3;
-                g_conn_from_inst = -1;
-                g_conn_from_port = "";
-                Log("Connect Ports tool active — click a port, then click target port.", "info");
-            }
-
-            ImGui::Separator();
-            // ── PLACED COMPONENTS TREE ────────────────────────────────────────
-            if (ImGui::CollapsingHeader("Placed Components", ImGuiTreeNodeFlags_DefaultOpen)) {
-                for (auto& inst : g_comp_instances) {
-                    const ComponentDef* def2 = GetInstDef(inst);
-                    std::string lbl = (def2 ? def2->name : inst.defId) + " [" + std::to_string(inst.instId) + "]";
-                    bool sel = (g_sel_comp == &inst);
-                    if (ImGui::Selectable(lbl.c_str(), sel)) {
-                        g_sel_comp  = &inst;
-                        g_sel_conn  = nullptr;
-                        g_selected_node = nullptr;
+        // 3. Model Directory Tree
+        if (ImGui::CollapsingHeader("Model Directory Tree", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::TreeNode("Active Nodes")) {
+                for (auto& n : g_nodes) {
+                    bool selected = (g_selected_node == n);
+                    if (ImGui::Selectable((std::string("[Node] ") + n->name).c_str(), selected)) {
+                        g_selected_node = n;
                         g_selected_link = nullptr;
-                        // mark selected
-                        for (auto& i2 : g_comp_instances) i2.selected = false;
-                        inst.selected = true;
                     }
                 }
+                ImGui::TreePop();
             }
-            if (ImGui::CollapsingHeader("Connections")) {
-                int ci = 0;
-                for (auto& conn : g_comp_connections) {
-                    std::string lbl = std::to_string(conn.fromInstId) + "." + conn.fromPortId
-                                    + " -> " + std::to_string(conn.toInstId) + "." + conn.toPortId;
-                    bool sel = (g_sel_conn == &conn);
-                    if (ImGui::Selectable(lbl.c_str(), sel)) {
-                        g_sel_conn  = &conn;
-                        g_sel_comp  = nullptr;
+            if (ImGui::TreeNode("Active Connections")) {
+                for (auto& l : g_links) {
+                    bool selected = (g_selected_link == l);
+                    std::string typeStr = (l->type == 0 ? "Cond" : (l->type == 1 ? "Conv" : (l->type == 2 ? "Rad" : "Flow")));
+                    std::string label = "[" + typeStr + "] (" + std::to_string(l->node_a) + " -> " + std::to_string(l->node_b) + ")";
+                    if (ImGui::Selectable(label.c_str(), selected)) {
+                        g_selected_link = l;
+                        g_selected_node = nullptr;
                     }
-                    ++ci;
                 }
-            }
-
-        } else {
-            // ── LEGACY GENERIC MODE ───────────────────────────────────────────
-            if (ImGui::CollapsingHeader("Object Library Templates", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::Columns(2, "lib_cols", false);
-                ImGui::Button("[Node] Mass\n(Node)", ImVec2(90.0f, 40.0f));
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Double click on empty canvas to place a Thermal Mass node.");
-                ImGui::NextColumn();
-                ImGui::Button("[Fixed] Boundary\n(Fixed T)", ImVec2(90.0f, 40.0f));
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Double click to create, then toggle 'Fixed Temperature' in Attribute sheet.");
-                ImGui::NextColumn();
-                ImGui::Button("Conduction\n(Link)", ImVec2(90.0f, 30.0f));
-                ImGui::NextColumn();
-                ImGui::Button("Convection\n(Link)", ImVec2(90.0f, 30.0f));
-                ImGui::NextColumn();
-                ImGui::Button("Radiation\n(Link)", ImVec2(90.0f, 30.0f));
-                ImGui::NextColumn();
-                ImGui::Button("Flow Loop\n(Advection)", ImVec2(90.0f, 30.0f));
-                ImGui::Columns(1);
-            }
-            ImGui::Separator();
-            if (ImGui::CollapsingHeader("Model Directory Tree", ImGuiTreeNodeFlags_DefaultOpen)) {
-                if (ImGui::TreeNode("Active Nodes")) {
-                    for (auto& n : g_nodes) {
-                        bool selected = (g_selected_node == &n);
-                        if (ImGui::Selectable((std::string("[Node] ") + n.name).c_str(), selected)) {
-                            g_selected_node = &n;
-                            g_selected_link = nullptr;
-                        }
-                    }
-                    ImGui::TreePop();
-                }
-                if (ImGui::TreeNode("Active Connections")) {
-                    for (auto& l : g_links) {
-                        bool selected = (g_selected_link == &l);
-                        std::string typeStr = (l.type == 0 ? "Cond" : (l.type == 1 ? "Conv" : (l.type == 2 ? "Rad" : "Flow")));
-                        std::string label = "[" + typeStr + "] (" + std::to_string(l.node_a) + " -> " + std::to_string(l.node_b) + ")";
-                        if (ImGui::Selectable(label.c_str(), selected)) {
-                            g_selected_link = &l;
-                            g_selected_node = nullptr;
-                        }
-                    }
-                    ImGui::TreePop();
-                }
+                ImGui::TreePop();
             }
         }
     }
@@ -1652,7 +1625,7 @@ void RenderUI() {
         // Canvas Toolbar
         if (ImGui::RadioButton("Select", g_current_tool == 0)) { setTool(0); g_placing_component=false; g_pending_comp_type=""; }
         ImGui::SameLine();
-        if (!g_comp_mode) {
+        if (true) {
             if (ImGui::RadioButton("Connect Link", g_current_tool == 1)) { setTool(1); }
             ImGui::SameLine();
         } else {
@@ -1665,7 +1638,7 @@ void RenderUI() {
             ImGui::SameLine();
         }
         ImGui::TextDisabled(" | Zoom: %.0f%%  |  %s mode", g_canvas_zoom * 100.0f,
-            g_comp_mode ? "Component Library" : "Generic Nodes");
+            "Simulation");
         
         ImGui::Separator();
         
@@ -1680,6 +1653,23 @@ void RenderUI() {
         draw_list->AddRect(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), IM_COL32(180, 180, 190, 255));
         
         ImGui::InvisibleButton("canvas_click_region", canvas_size);
+        
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("COMP_LIBRARY_ITEM")) {
+                const char* defId = (const char*)payload->Data;
+                ImVec2 drop_mouse_pos = ImGui::GetMousePos();
+                ImVec2 local_drop = ScreenToCanvas(drop_mouse_pos, canvas_pos);
+                if (g_grid_snap) {
+                    local_drop.x = std::round(local_drop.x / GRID_SIZE) * GRID_SIZE;
+                    local_drop.y = std::round(local_drop.y / GRID_SIZE) * GRID_SIZE;
+                }
+                PlaceComponent(defId, local_drop.x, local_drop.y);
+                g_placing_component = false;
+                g_pending_comp_type = "";
+                Log("Dropped component " + std::string(defId) + " onto canvas.", "success");
+            }
+            ImGui::EndDragDropTarget();
+        }
         
         // Canvas interactions
         bool is_hovered = ImGui::IsItemHovered();
@@ -1726,8 +1716,8 @@ void RenderUI() {
         
         // --- DRAW CONNECTIONS ---
         for (const auto& l : g_links) {
-            auto itA = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == l.node_a; });
-            auto itB = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == l.node_b; });
+            auto itA = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == l->node_a; });
+            auto itB = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == l->node_b; });
             if (itA == g_nodes.end() || itB == g_nodes.end()) continue;
             
             PortPos portA = GetClosestPort(*itA, *itB);
@@ -1739,13 +1729,13 @@ void RenderUI() {
                 screenRoute.push_back(CanvasToScreen(pt, canvas_pos));
             }
             
-            bool is_link_selected = (g_selected_link != nullptr && g_selected_link->id == l.id);
+            bool is_link_selected = (g_selected_link != nullptr && g_selected_link->id == l->id);
             ImU32 linkColor = IM_COL32(71, 85, 105, 255); // Gray Conduction
             
-            if (l.type == 1)      linkColor = IM_COL32(21, 128, 61, 255);   // Green Convection
-            else if (l.type == 2) linkColor = IM_COL32(234, 88, 12, 255);   // Orange Radiation
-            else if (l.type == 3) linkColor = IM_COL32(2, 132, 199, 255);   // Blue Coolant Flow
-            else if (l.type == 4) linkColor = IM_COL32(124, 58, 237, 255);  // Violet Fan / Pump Link
+            if (l->type == 1)      linkColor = IM_COL32(21, 128, 61, 255);   // Green Convection
+            else if (l->type == 2) linkColor = IM_COL32(234, 88, 12, 255);   // Orange Radiation
+            else if (l->type == 3) linkColor = IM_COL32(2, 132, 199, 255);   // Blue Coolant Flow
+            else if (l->type == 4) linkColor = IM_COL32(124, 58, 237, 255);  // Violet Fan / Pump Link
             
             // Draw link line segments
             for (size_t i = 0; i < screenRoute.size() - 1; ++i) {
@@ -1756,13 +1746,13 @@ void RenderUI() {
             }
             
             // Draw animated flow chevrons
-            if ((l.type == 3 || l.type == 4) && g_is_running) {
+            if ((l->type == 3 || l->type == 4) && g_is_running) {
                 for (size_t i = 0; i < screenRoute.size() - 1; ++i) {
                     size_t start_idx = i;
                     size_t end_idx = i + 1;
-                    double dir = l.p2;
-                    if (l.type == 4) {
-                        dir = l.p2 >= 0.0 ? 1.0 : -1.0;
+                    double dir = l->p2;
+                    if (l->type == 4) {
+                        dir = l->p2 >= 0.0 ? 1.0 : -1.0;
                     }
                     if (dir < 0.0) {
                         start_idx = i + 1;
@@ -1805,42 +1795,32 @@ void RenderUI() {
                 draw_list->AddRect(ImVec2(mid.x - 14, mid.y - 7), ImVec2(mid.x + 14, mid.y + 7), linkColor, 2.0f);
                 
                 char paramText[16];
-                if (l.p1 >= 1000.0) sprintf(paramText, "%.1fk", l.p1 / 1000.0);
-                else sprintf(paramText, "%.0f", l.p1);
+                if (l->p1 >= 1000.0) sprintf(paramText, "%.1fk", l->p1 / 1000.0);
+                else sprintf(paramText, "%.0f", l->p1);
                 
                 draw_list->AddText(ImVec2(mid.x - 10, mid.y - 6), linkColor, paramText);
             }
         }
         
         // --- DRAW NODE BLOCKS ---
-        const float w = 70.0f;
-        const float h = 40.0f;
-        
         for (auto& n : g_nodes) {
-            ImVec2 screenPos = CanvasToScreen(ImVec2(n.x, n.y), canvas_pos);
+            float w, h;
+            n->GetBounds(w, h);
+            ImVec2 screenPos = CanvasToScreen(ImVec2(n->x, n->y), canvas_pos);
             ImVec2 topLeft = ImVec2(screenPos.x - (w * g_canvas_zoom) / 2.0f, screenPos.y - (h * g_canvas_zoom) / 2.0f);
             ImVec2 botRight = ImVec2(screenPos.x + (w * g_canvas_zoom) / 2.0f, screenPos.y + (h * g_canvas_zoom) / 2.0f);
             
-            bool is_selected = (g_selected_node != nullptr && g_selected_node->id == n.id);
+            bool is_selected = (g_selected_node != nullptr && g_selected_node->id == n->id);
             
-            // Color based on temperature
-            float tFactor = (float)((n.temp - 10.0) / 90.0);
-            tFactor = std::max(0.0f, std::min(1.0f, tFactor));
-            ImU32 blockColor = IM_COL32(220 + tFactor * 35, 230 - tFactor * 40, 250 - tFactor * 60, 255);
-            if (n.is_fixed) blockColor = IM_COL32(255, 238, 192, 255); // Orange boundary
+            // Draw polymorphic symbol
+            n->DrawSymbol(draw_list, screenPos, g_canvas_zoom, is_selected, g_is_running, {});
             
-            ImU32 borderColor = is_selected ? IM_COL32(2, 92, 162, 255) : (n.is_fixed ? IM_COL32(217, 119, 6, 255) : IM_COL32(100, 116, 139, 255));
-            
-            // Draw Main Block
-            draw_list->AddRectFilled(topLeft, botRight, blockColor, 4.0f * g_canvas_zoom);
-            draw_list->AddRect(topLeft, botRight, borderColor, (is_selected ? 2.5f : 1.5f), 4.0f * g_canvas_zoom);
-            
-            // Double line for boundary
-            if (n.is_fixed) {
+            // Double line for generic fixed boundary (only for generic nodes, i.e., those without ports)
+            if (n->is_fixed && n->GetPorts().empty()) {
                 draw_list->AddRect(ImVec2(topLeft.x + 2 * g_canvas_zoom, topLeft.y + 2 * g_canvas_zoom), ImVec2(botRight.x - 2 * g_canvas_zoom, botRight.y - 2 * g_canvas_zoom), IM_COL32(180, 83, 9, 255), 1.0f, 3.0f * g_canvas_zoom);
             }
             
-            // Draw 4 Port terminals
+            // Draw Port terminals
             auto ports = GetPortPositions(n);
             for (const auto& p : ports) {
                 ImVec2 sp = CanvasToScreen(p.pos, canvas_pos);
@@ -1852,30 +1832,32 @@ void RenderUI() {
             if (g_canvas_zoom >= 0.6f) {
                 // Temp label text
                 char tempText[32];
-                sprintf(tempText, "%.1f C", n.temp);
+                sprintf(tempText, "%.1f C", n->temp);
                 draw_list->AddText(ImVec2(screenPos.x - 18, screenPos.y - 8), IM_COL32(17, 24, 39, 255), tempText);
                 
-                // Name label text (bottom)
-                draw_list->AddText(ImVec2(topLeft.x + 2, screenPos.y + 6), IM_COL32(55, 65, 81, 255), n.name.substr(0, 11).c_str());
+                // Name label text (bottom) - only for generic nodes
+                if (n->GetPorts().empty()) {
+                    draw_list->AddText(ImVec2(topLeft.x + 2, screenPos.y + 6), IM_COL32(55, 65, 81, 255), n->name.substr(0, 11).c_str());
+                }
                 
                 // Heat source generation tag
-                if (n.q_gen > 0.0) {
+                if (n->q_gen > 0.0) {
                     char qText[32];
-                    if (n.q_gen >= 1000.0) sprintf(qText, "Q:%.1fkW", n.q_gen / 1000.0);
-                    else sprintf(qText, "Q:%.0fW", n.q_gen);
+                    if (n->q_gen >= 1000.0) sprintf(qText, "Q:%.1fkW", n->q_gen / 1000.0);
+                    else sprintf(qText, "Q:%.0fW", n->q_gen);
                     draw_list->AddText(ImVec2(topLeft.x, topLeft.y - 12), IM_COL32(185, 28, 28, 255), qText);
                 }
             } else if (is_hovered) {
                 // Display node info tooltip when zoomed out
-                if (local_mouse.x >= n.x - w / 2.0f && local_mouse.x <= n.x + w / 2.0f &&
-                    local_mouse.y >= n.y - h / 2.0f && local_mouse.y <= n.y + h / 2.0f) {
+                if (local_mouse.x >= n->x - w / 2.0f && local_mouse.x <= n->x + w / 2.0f &&
+                    local_mouse.y >= n->y - h / 2.0f && local_mouse.y <= n->y + h / 2.0f) {
                     ImGui::BeginTooltip();
-                    ImGui::TextColored(ImVec4(0.02f, 0.36f, 0.63f, 1.0f), "Node: %s", n.name.c_str());
+                    ImGui::TextColored(ImVec4(0.02f, 0.36f, 0.63f, 1.0f), "Node: %s", n->name.c_str());
                     ImGui::Separator();
-                    ImGui::Text("Temperature: %.2f C", n.temp);
-                    ImGui::Text("Heat Capacity: %.1f J/K", n.capacity);
-                    ImGui::Text("Heat Source: %.1f W", n.q_gen);
-                    ImGui::Text("Fixed Bound: %s", n.is_fixed ? "True" : "False");
+                    ImGui::Text("Temperature: %.2f C", n->temp);
+                    ImGui::Text("Heat Capacity: %.1f J/K", n->capacity);
+                    ImGui::Text("Heat Source: %.1f W", n->q_gen);
+                    ImGui::Text("Fixed Bound: %s", n->is_fixed ? "True" : "False");
                     ImGui::EndTooltip();
                 }
             }
@@ -1883,8 +1865,8 @@ void RenderUI() {
         
         // Draw temporary connection line when creating link
         if (g_linking_start_node && g_current_tool == 1) {
-            DesktopNode tempTargetNode = { 0, "", local_mouse.x, local_mouse.y, 0.0, 0.0, 0.0, false };
-            PortPos portA = GetClosestPort(*g_linking_start_node, tempTargetNode);
+            auto tempTargetNode = std::make_shared<DesktopNode>(); tempTargetNode->x = local_mouse.x; tempTargetNode->y = local_mouse.y;
+            PortPos portA = GetClosestPort(g_linking_start_node, tempTargetNode);
             
             std::vector<ImVec2> previewRoute;
             previewRoute.push_back(portA.pos);
@@ -1907,221 +1889,50 @@ void RenderUI() {
             }
         }
 
-        // ─── COMPONENT LIBRARY LAYER ────────────────────────────────────────────────
-        if (g_comp_mode) {
-            // Draw wired connections first (behind components)
-            DrawComponentConnections(draw_list, canvas_pos);
-
-            // Draw placed components
-            DrawComponentInstances(draw_list, canvas_pos);
-
-            // Ghost preview when placing a component
-            if (g_placing_component && !g_pending_comp_type.empty() && is_hovered) {
-                const ComponentDef* def = GetCompDefById(g_pending_comp_type);
-                if (def) {
-                    ImVec2 ghostC = CanvasToScreen(local_mouse, canvas_pos);
-                    // Draw semi-transparent ghost
-                    draw_list->AddCircle(ghostC, 30.0f * g_canvas_zoom, IM_COL32(80, 200, 100, 180), 32, 2.0f);
-                    draw_list->AddText(ImVec2(ghostC.x + 12, ghostC.y - 8),
-                        IM_COL32(100, 255, 130, 220), def->name.c_str());
-                }
-            }
-
-            // Port hover detection (tool 3 = Connect Ports)
-            if (g_current_tool == 3) {
-                g_hovered_port_inst = -1;
-                g_hovered_port_id   = "";
-                float hitR = 12.0f; // screen px
-                for (const auto& inst : g_comp_instances) {
-                    const ComponentDef* def = GetInstDef(inst);
-                    if (!def) continue;
-                    for (const auto& p : def->ports) {
-                        ImVec2 wp = GetPortWorldPos(inst, *def, p.id, canvas_pos, g_canvas_zoom, g_canvas_scrolling);
-                        if (std::hypot(wp.x - mouse_pos.x, wp.y - mouse_pos.y) < hitR) {
-                            g_hovered_port_inst = inst.instId;
-                            g_hovered_port_id   = p.id;
-                            ImGui::SetTooltip("%s [%s]", p.label.c_str(), PortTypeName(p.type));
-                            break;
-                        }
-                    }
-                    if (g_hovered_port_inst >= 0) break;
-                }
-            }
-
-            // Draw in-progress connection rubber-band (tool 3)
-            if (g_current_tool == 3 && g_conn_from_inst >= 0) {
-                CompInstance* fInst = nullptr;
-                for (auto& inst : g_comp_instances) if (inst.instId == g_conn_from_inst) { fInst = &inst; break; }
-                if (fInst) {
-                    const ComponentDef* fd = GetInstDef(*fInst);
-                    if (fd) {
-                        ImVec2 pA = GetPortWorldPos(*fInst, *fd, g_conn_from_port, canvas_pos, g_canvas_zoom, g_canvas_scrolling);
-                        ImU32 rubberCol = IM_COL32(80, 200, 120, 200);
-                        // Find hovered port for snap
-                        ImVec2 target = mouse_pos;
-                        if (g_hovered_port_inst >= 0 && g_hovered_port_inst != g_conn_from_inst) {
-                            CompInstance* hInst = nullptr;
-                            for (auto& inst : g_comp_instances) if (inst.instId == g_hovered_port_inst) { hInst = &inst; break; }
-                            if (hInst) {
-                                const ComponentDef* hd = GetInstDef(*hInst);
-                                if (hd) target = GetPortWorldPos(*hInst, *hd, g_hovered_port_id, canvas_pos, g_canvas_zoom, g_canvas_scrolling);
-                            }
-                        }
-                        float mx = 0.5f*(pA.x + target.x);
-                        draw_list->AddLine(pA, ImVec2(mx, pA.y), rubberCol, 2.0f);
-                        draw_list->AddLine(ImVec2(mx, pA.y), ImVec2(mx, target.y), rubberCol, 2.0f);
-                        draw_list->AddLine(ImVec2(mx, target.y), target, rubberCol, 2.0f);
-                    }
-                }
-            }
-        } // end if g_comp_mode
-        
-        // --- CANVAS INTERACTIONS (CLICKS, DRAGS, NEW NODES) ---
+        // --- CANVAS INTERACTIONS ---
         if (is_hovered) {
-
-            // ESC cancels place mode
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                g_placing_component = false;
-                g_pending_comp_type = "";
-                g_conn_from_inst = -1;
-                g_conn_from_port = "";
-                if (g_current_tool == 2 || g_current_tool == 3)
-                    g_current_tool = 0;
-            }
-
-            // Mouse Pressed (Select or Drag or start linking)
             if (ImGui::IsMouseClicked(0)) {
-
-                // ── Tool 2: Place Component ──────────────────────────────────
-                if (g_comp_mode && g_current_tool == 2 && g_placing_component) {
-                    float cx = local_mouse.x, cy = local_mouse.y;
+                auto hit_node = getNodeAt(local_mouse);
+                if (g_placing_component) {
+                    float targetX = local_mouse.x;
+                    float targetY = local_mouse.y;
                     if (g_grid_snap) {
-                        cx = std::round(cx / GRID_SIZE) * GRID_SIZE;
-                        cy = std::round(cy / GRID_SIZE) * GRID_SIZE;
+                        targetX = std::round(targetX / GRID_SIZE) * GRID_SIZE;
+                        targetY = std::round(targetY / GRID_SIZE) * GRID_SIZE;
                     }
-                    PlaceComponent(g_pending_comp_type, cx, cy);
-                    // Stay in placing mode so user can place multiple instances
-                    // Shift+click keeps placing; plain click places once then returns to Select
-                    if (!io.KeyShift) {
-                        g_placing_component = false;
-                        g_pending_comp_type = "";
-                        g_current_tool = 0;
-                    }
-                }
-                // ── Tool 3: Connect Ports ──────────────────────────────────
-                else if (g_comp_mode && g_current_tool == 3) {
-                    if (g_hovered_port_inst >= 0) {
-                        if (g_conn_from_inst < 0) {
-                            // Start of connection
-                            g_conn_from_inst = g_hovered_port_inst;
-                            g_conn_from_port = g_hovered_port_id;
-                            Log("Port selected: " + g_conn_from_port + " on inst " + std::to_string(g_conn_from_inst), "info");
-                        } else if (g_hovered_port_inst != g_conn_from_inst) {
-                            // End of connection — type check
-                            CompInstance* fInst = nullptr, *tInst = nullptr;
-                            for (auto& inst : g_comp_instances) {
-                                if (inst.instId == g_conn_from_inst) fInst = &inst;
-                                if (inst.instId == g_hovered_port_inst) tInst = &inst;
-                            }
-                            if (fInst && tInst) {
-                                const ComponentDef* fd = GetInstDef(*fInst);
-                                const ComponentDef* td = GetInstDef(*tInst);
-                                if (fd && td) {
-                                    // Get port type of each
-                                    PortType fromType = PortType::Any, toType = PortType::Any;
-                                    for (const auto& p : fd->ports) if (p.id == g_conn_from_port) { fromType = p.type; break; }
-                                    for (const auto& p : td->ports) if (p.id == g_hovered_port_id) { toType = p.type; break; }
-
-                                    if (PortTypesCompatible(fromType, toType)) {
-                                        PushUndoState();
-                                        CompConnection conn;
-                                        conn.connId     = g_next_conn_id++;
-                                        conn.fromInstId = g_conn_from_inst;
-                                        conn.fromPortId = g_conn_from_port;
-                                        conn.toInstId   = g_hovered_port_inst;
-                                        conn.toPortId   = g_hovered_port_id;
-                                        conn.portType   = fromType;
-                                        conn.flow_rate  = 20.0;
-                                        g_comp_connections.push_back(conn);
-                                        SyncComponentsWithSolver();
-                                        Log("Connected: " + g_conn_from_port + " -> " + g_hovered_port_id, "success");
-                                    } else {
-                                        Log("Port type mismatch: " + std::string(PortTypeName(fromType))
-                                            + " cannot connect to " + std::string(PortTypeName(toType)), "error");
-                                    }
-                                }
-                            }
-                            g_conn_from_inst = -1;
-                            g_conn_from_port = "";
-                        }
+                    PlaceComponent(g_pending_comp_type, targetX, targetY);
+                    g_placing_component = false;
+                    g_pending_comp_type = "";
+                } else if (g_current_tool == 0) { // Select tool
+                    if (hit_node) {
+                        g_selected_node = hit_node;
+                        g_selected_link = nullptr;
+                        isDragging = true;
+                        dragNode = hit_node;
+                        dragOffset.x = local_mouse.x - hit_node->x;
+                        dragOffset.y = local_mouse.y - hit_node->y;
+                        g_drag_backup.nodes = g_nodes;
+                        g_drag_backup.links = g_links;
+                        g_drag_backup_valid = true;
                     } else {
-                        // Clicked empty space — cancel pending connection
-                        g_conn_from_inst = -1;
-                        g_conn_from_port = "";
-                    }
-                }
-                // ── Tool 0: Select (also handles component selection) ─────────
-                else {
-                    auto hit_node = getNodeAt(local_mouse);
-                    if (g_comp_mode) {
-                        // Check if a component was clicked
-                        CompInstance* hitComp = nullptr;
-                        for (auto& inst : g_comp_instances) {
-                            const ComponentDef* def = GetInstDef(inst);
-                            if (!def) continue;
-                            float hw = def->width * 0.5f + 8.0f;
-                            float hh = def->height * 0.5f + 8.0f;
-                            if (local_mouse.x >= inst.x - hw && local_mouse.x <= inst.x + hw &&
-                                local_mouse.y >= inst.y - hh && local_mouse.y <= inst.y + hh) {
-                                hitComp = &inst; break;
-                            }
-                        }
-                        if (hitComp) {
-                            g_sel_comp = hitComp;
-                            g_sel_conn = nullptr;
+                        auto hit_link = getLinkAt(local_mouse);
+                        if (hit_link) {
+                            g_selected_link = hit_link;
+                            g_selected_node = nullptr;
+                        } else {
                             g_selected_node = nullptr;
                             g_selected_link = nullptr;
-                            for (auto& i2 : g_comp_instances) i2.selected = false;
-                            hitComp->selected = true;
-                            isDragging = true;
-                            dragOffset.x = local_mouse.x - hitComp->x;
-                            dragOffset.y = local_mouse.y - hitComp->y;
-                        } else {
-                            g_sel_comp = nullptr;
-                            for (auto& i2 : g_comp_instances) i2.selected = false;
                         }
-                    } else {
-                        if (g_current_tool == 0) { // Select tool
-                            if (hit_node) {
-                                g_selected_node = hit_node;
-                                g_selected_link = nullptr;
-                                isDragging = true;
-                                dragNode = hit_node;
-                                dragOffset.x = local_mouse.x - hit_node->x;
-                                dragOffset.y = local_mouse.y - hit_node->y;
-                                g_drag_backup.nodes = g_nodes;
-                                g_drag_backup.links = g_links;
-                                g_drag_backup_valid = true;
-                            } else {
-                                auto hit_link = getLinkAt(local_mouse);
-                                if (hit_link) {
-                                    g_selected_link = hit_link;
-                                    g_selected_node = nullptr;
-                                } else {
-                                    g_selected_node = nullptr;
-                                    g_selected_link = nullptr;
-                                }
-                            }
-                        } else if (g_current_tool == 1) { // Connect link tool
-                            if (hit_node) {
-                                g_linking_start_node = hit_node;
-                            }
-                        }
+                    }
+                } else if (g_current_tool == 1) { // Connect link tool
+                    if (hit_node) {
+                        g_linking_start_node = hit_node;
                     }
                 }
             }
+        }
 
-            // Mouse Dragging
+        // Mouse Dragging
             if (isDragging && ImGui::IsMouseDragging(0)) {
                 float targetX = local_mouse.x - dragOffset.x;
                 float targetY = local_mouse.y - dragOffset.y;
@@ -2129,10 +1940,7 @@ void RenderUI() {
                     targetX = std::round(targetX / GRID_SIZE) * GRID_SIZE;
                     targetY = std::round(targetY / GRID_SIZE) * GRID_SIZE;
                 }
-                if (g_comp_mode && g_sel_comp) {
-                    g_sel_comp->x = targetX;
-                    g_sel_comp->y = targetY;
-                } else if (dragNode) {
+                if (dragNode) {
                     dragNode->x = targetX;
                     dragNode->y = targetY;
                 }
@@ -2142,10 +1950,10 @@ void RenderUI() {
             if (ImGui::IsMouseReleased(0)) {
                 if (isDragging) {
                     isDragging = false;
-                    if (!g_comp_mode && dragNode && g_drag_backup_valid) {
-                        auto it = std::find_if(g_drag_backup.nodes.begin(), g_drag_backup.nodes.end(), [&](const DesktopNode& n) { return n.id == dragNode->id; });
+                    if (dragNode && g_drag_backup_valid) {
+                        auto it = std::find_if(g_drag_backup.nodes.begin(), g_drag_backup.nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == dragNode->id; });
                         if (it != g_drag_backup.nodes.end()) {
-                            if (it->x != dragNode->x || it->y != dragNode->y) {
+                            if ((*it)->x != dragNode->x || (*it)->y != dragNode->y) {
                                 g_undo_stack.push_back(g_drag_backup);
                                 if (g_undo_stack.size() > 50) g_undo_stack.erase(g_undo_stack.begin());
                                 g_redo_stack.clear();
@@ -2156,44 +1964,20 @@ void RenderUI() {
                     dragNode = nullptr;
                     g_drag_backup_valid = false;
                 }
-                if (!g_comp_mode && g_linking_start_node && g_current_tool == 1) {
+                if (g_linking_start_node && g_current_tool == 1) {
                     auto hit_end = getNodeAt(local_mouse);
                     if (hit_end && hit_end->id != g_linking_start_node->id) {
                         g_show_link_modal = true;
                         g_modal_node_a_id = g_linking_start_node->id;
                         g_modal_node_b_id = hit_end->id;
-                        g_modal_link_type = 0;
+                        g_modal_link_type = g_pending_link_type;
                         g_modal_link_p1 = 10.0;
                         g_modal_link_p2 = 1.0;
                     }
                     g_linking_start_node = nullptr;
                 }
             }
-
-            // Double Click to add new node (legacy mode only)
-            if (!g_comp_mode && ImGui::IsMouseDoubleClicked(0)) {
-                auto hit_node = getNodeAt(local_mouse);
-                if (!hit_node) {
-                    float x = local_mouse.x;
-                    float y = local_mouse.y;
-                    if (g_grid_snap) {
-                        x = std::round(x / GRID_SIZE) * GRID_SIZE;
-                        y = std::round(y / GRID_SIZE) * GRID_SIZE;
-                    }
-                    int nextId = g_nodes.empty() ? 1 : std::max_element(g_nodes.begin(), g_nodes.end(), [](const DesktopNode& a, const DesktopNode& b){ return a.id < b.id; })->id + 1;
-                    PushUndoState();
-                    DesktopNode newNode = { nextId, "Mass " + std::to_string(nextId), x, y, 25.0, 500.0, 0.0, false };
-                    g_nodes.push_back(newNode);
-                    g_plot_active_nodes[nextId] = true;
-                    SyncSystemWithSolver();
-                    ResetHistory();
-                    g_selected_node = &g_nodes.back();
-                    g_selected_link = nullptr;
-                    Log("Placed node component [Mass " + std::to_string(nextId) + "] on canvas.", "info");
-                }
-            }
         }
-    }
     ImGui::End();
 
     // --- PANEL 4: TABBED SIDEBAR (Right) ---
@@ -2205,75 +1989,8 @@ void RenderUI() {
             if (ImGui::BeginTabItem("Attribute Sheet")) {
                 ImGui::BeginChild("SS_ChildRegion");
 
-                // ── COMPONENT LIBRARY ATTRIBUTE SHEET ───────────────────────────
-                if (g_comp_mode && g_sel_comp != nullptr) {
-                    const ComponentDef* def = GetInstDef(*g_sel_comp);
-                    if (def) {
-                        ImGui::TextColored(ImVec4(0.9f,0.7f,0.2f,1.0f), "%s  [ID: %d]",
-                            def->name.c_str(), g_sel_comp->instId);
-                        ImGui::TextDisabled("%s", def->description.c_str());
-                        ImGui::Separator();
-
-                        // Port legend
-                        ImGui::TextDisabled("Ports:");
-                        for (const auto& p : def->ports) {
-                            ImU32 pc = PortTypeColor(p.type);
-                            ImGui::TextColored(
-                                ImVec4(((pc>>0)&0xFF)/255.f,((pc>>8)&0xFF)/255.f,((pc>>16)&0xFF)/255.f,1.f),
-                                "  [%s] %s (%s)",
-                                p.isOutput ? "OUT" : "IN", p.label.c_str(), PortTypeName(p.type));
-                        }
-                        ImGui::Separator();
-
-                        // Parameter table
-                        if (ImGui::BeginTable("comp_param_table", 4,
-                            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
-                            ImGui::TableSetupColumn("Parameter",   ImGuiTableColumnFlags_WidthFixed, 120.f);
-                            ImGui::TableSetupColumn("Value",       ImGuiTableColumnFlags_WidthFixed, 80.f);
-                            ImGui::TableSetupColumn("Unit",        ImGuiTableColumnFlags_WidthFixed, 36.f);
-                            ImGui::TableSetupColumn("Description", ImGuiTableColumnFlags_WidthStretch);
-                            ImGui::TableHeadersRow();
-
-                            for (const auto& pd : def->params) {
-                                auto it = g_sel_comp->params.find(pd.key);
-                                double val = (it != g_sel_comp->params.end()) ? it->second : pd.defaultValue;
-
-                                ImGui::TableNextRow();
-                                ImGui::TableNextColumn(); ImGui::Text("%s", pd.label.c_str());
-                                ImGui::TableNextColumn();
-                                float fval = (float)val;
-                                ImGui::SetNextItemWidth(-1);
-                                std::string sliderLabel = "##comp_" + pd.key;
-                                if (ImGui::SliderFloat(sliderLabel.c_str(), &fval,
-                                    (float)pd.minVal, (float)pd.maxVal, "%.3g")) {
-                                    g_sel_comp->params[pd.key] = fval;
-                                    SyncComponentsWithSolver();
-                                }
-                                ImGui::TableNextColumn(); ImGui::TextDisabled("%s", pd.unit.c_str());
-                                ImGui::TableNextColumn(); ImGui::TextDisabled("%s", pd.description.c_str());
-                            }
-                            ImGui::EndTable();
-                        }
-
-                        ImGui::Spacing();
-                        // Delete component button
-                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f,0.1f,0.1f,1.0f));
-                        if (ImGui::Button("Delete Component", ImVec2(-1,0))) {
-                            PushUndoState();
-                            int delId = g_sel_comp->instId;
-                            g_comp_instances.erase(std::remove_if(g_comp_instances.begin(), g_comp_instances.end(),
-                                [delId](const CompInstance& i){ return i.instId == delId; }), g_comp_instances.end());
-                            g_comp_connections.erase(std::remove_if(g_comp_connections.begin(), g_comp_connections.end(),
-                                [delId](const CompConnection& c){ return c.fromInstId==delId || c.toInstId==delId; }), g_comp_connections.end());
-                            g_sel_comp = nullptr;
-                            SyncComponentsWithSolver();
-                            Log("Deleted component instance " + std::to_string(delId), "warning");
-                        }
-                        ImGui::PopStyleColor();
-                    }
-                }
                 // ── LEGACY NODE/LINK ATTRIBUTE SHEET ───────────────────────────
-                else if (!g_comp_mode || g_sel_comp == nullptr) {
+                {
                 if (g_selected_node == nullptr && g_selected_link == nullptr) {
                     ImGui::TextDisabled("No component selected.");
                     ImGui::TextDisabled("Select an element on canvas to edit attributes.");
@@ -2342,7 +2059,7 @@ void RenderUI() {
                             PushUndoState();
                             g_selected_node->domain = domain_idx;
                             if (domain_idx == 0) {
-                                UpdateNodeCapacityFromMaterial(*g_selected_node);
+                                UpdateNodeCapacityFromMaterial(g_selected_node);
                             }
                             SyncSystemWithSolver();
                         }
@@ -2362,7 +2079,7 @@ void RenderUI() {
                                     if (ImGui::Selectable(mat.name.c_str(), is_selected)) {
                                         PushUndoState();
                                         g_selected_node->material = mat.name;
-                                        UpdateNodeCapacityFromMaterial(*g_selected_node);
+                                        UpdateNodeCapacityFromMaterial(g_selected_node);
                                         SyncSystemWithSolver();
                                     }
                                     if (is_selected) {
@@ -2385,7 +2102,7 @@ void RenderUI() {
                                 if (ImGui::InputDouble("##massNodeInput", &mass_val, 0.1, 1.0, "%.2f")) {
                                     if (mass_val > 0.0) {
                                         g_selected_node->mass = mass_val;
-                                        UpdateNodeCapacityFromMaterial(*g_selected_node);
+                                        UpdateNodeCapacityFromMaterial(g_selected_node);
                                         SyncSystemWithSolver();
                                     }
                                 }
@@ -2548,7 +2265,7 @@ void RenderUI() {
                         
                         // Capacity properties calculation
                         double cap_val = 0.0, c_a1_val = 0.0, c_a2_val = 0.0;
-                        GetDesktopNodeProperties(*g_selected_node, cap_val, c_a1_val, c_a2_val);
+                        GetDesktopNodeProperties(g_selected_node, cap_val, c_a1_val, c_a2_val);
                         bool is_readonly = (g_selected_node->domain == 1) || (g_selected_node->material != "Custom");
 
                         // Capacity
@@ -2633,6 +2350,70 @@ void RenderUI() {
                         }
                         ImGui::TableNextColumn(); ImGui::Text("bool");
                         ImGui::TableNextColumn(); ImGui::Text("Constant temperature constraint");
+
+                        // Draw custom physical component parameters
+                        if (!g_selected_node->params.empty()) {
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::TextDisabled("Physical Params");
+                            ImGui::TableNextColumn();
+                            ImGui::TextDisabled("---");
+                            ImGui::TableNextColumn();
+                            ImGui::TextDisabled("---");
+                            ImGui::TableNextColumn();
+                            ImGui::TextDisabled("---");
+
+                            for (auto& pair : g_selected_node->params) {
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::Text("%s", pair.first.c_str());
+                                ImGui::TableNextColumn();
+                                double val = pair.second;
+                                ImGui::PushItemWidth(-FLT_MIN);
+                                char label[64];
+                                sprintf(label, "##param_%s", pair.first.c_str());
+                                if (ImGui::InputDouble(label, &val, 1.0, 10.0, "%.2f")) {
+                                    pair.second = val;
+                                    if (pair.first == "heat_rejection") {
+                                        g_selected_node->q_gen = val;
+                                    } else if (pair.first == "block_capacity") {
+                                        g_selected_node->capacity = val;
+                                    } else if (pair.first == "block_jacket_cond") {
+                                        auto block = std::dynamic_pointer_cast<EngineBlockNode>(g_selected_node);
+                                        if (block && block->internalCond) {
+                                            block->internalCond->p1 = val;
+                                        }
+                                    } else if (pair.first == "jacket_volume") {
+                                        auto block = std::dynamic_pointer_cast<EngineBlockNode>(g_selected_node);
+                                        if (block && block->jacketNode) {
+                                            block->jacketNode->fluid_volume = val;
+                                        }
+                                    } else if (pair.first == "coolant_hA") {
+                                        auto rad = std::dynamic_pointer_cast<RadiatorNode>(g_selected_node);
+                                        if (rad && rad->internalConv) {
+                                            rad->internalConv->p1 = val;
+                                        }
+                                    } else if (pair.first == "coolant_volume") {
+                                        g_selected_node->fluid_volume = val;
+                                    } else if (pair.first == "core_capacity") {
+                                        auto rad = std::dynamic_pointer_cast<RadiatorNode>(g_selected_node);
+                                        if (rad && rad->coreNode) {
+                                            rad->coreNode->capacity = val;
+                                        }
+                                    } else if (pair.first == "temp_c") {
+                                        g_selected_node->temp = val;
+                                        g_selected_node->temp_init = val;
+                                    }
+                                    SyncSystemWithSolver();
+                                }
+                                if (ImGui::IsItemActivated()) { PushUndoState(); }
+                                ImGui::PopItemWidth();
+                                ImGui::TableNextColumn();
+                                ImGui::Text("-");
+                                ImGui::TableNextColumn();
+                                ImGui::Text("Component parameter");
+                            }
+                        }
                         
                         ImGui::EndTable();
                     }
@@ -2697,8 +2478,8 @@ void RenderUI() {
                         else if (g_selected_link->type == 3) {
                             p1Label = "Flow Rate";
                             int up_id = (g_selected_link->p2 >= 0.0) ? g_selected_link->node_a : g_selected_link->node_b;
-                            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) { return n.id == up_id; });
-                            if (it != g_nodes.end() && it->domain == 1) {
+                            auto it = std::find_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) { return n->id == up_id; });
+                            if (it != g_nodes.end() && (*it)->domain == 1) {
                                 p1Unit = "L/min";
                                 p1Desc = "Volumetric coolant flow rate";
                             } else {
@@ -2712,7 +2493,7 @@ void RenderUI() {
                         }
                         
                         ImGui::TableNextRow();
-                        ImGui::TableNextColumn(); ImGui::Text(p1Label.c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%s", p1Label.c_str());
                         ImGui::TableNextColumn();
                         double p1_val = g_selected_link->p1;
                         ImGui::PushItemWidth(-FLT_MIN);
@@ -2723,12 +2504,12 @@ void RenderUI() {
                         }
                         if (ImGui::IsItemActivated()) { PushUndoState(); }
                         ImGui::PopItemWidth();
-                        ImGui::TableNextColumn(); ImGui::Text(p1Unit.c_str());
-                        ImGui::TableNextColumn(); ImGui::Text((p1Desc + " (a0 term)").c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%s", p1Unit.c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%s", (p1Desc + " (a0 term)").c_str());
                         
                         // Parameter 1 Linear term
                         ImGui::TableNextRow();
-                        ImGui::TableNextColumn(); ImGui::Text(g_selected_link->type == 4 ? "Resist Coeff K" : (p1Label + " Coeff a1").c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%s", g_selected_link->type == 4 ? "Resist Coeff K" : (p1Label + " Coeff a1").c_str());
                         ImGui::TableNextColumn();
                         double g_a1_val = g_selected_link->g_a1;
                         ImGui::PushItemWidth(-FLT_MIN);
@@ -2739,12 +2520,12 @@ void RenderUI() {
                         if (ImGui::IsItemActivated()) { PushUndoState(); }
                         ImGui::PopItemWidth();
                         std::string g_a1Unit = g_selected_link->type == 4 ? "Pa/(m/s)2" : p1Unit + "/K";
-                        ImGui::TableNextColumn(); ImGui::Text(g_a1Unit.c_str());
-                        ImGui::TableNextColumn(); ImGui::Text(g_selected_link->type == 4 ? "System quadratic flow resistance" : "Linear temp coefficient a1");
+                        ImGui::TableNextColumn(); ImGui::Text("%s", g_a1Unit.c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%s", g_selected_link->type == 4 ? "System quadratic flow resistance" : "Linear temp coefficient a1");
                         
                         // Parameter 1 Quadratic term
                         ImGui::TableNextRow();
-                        ImGui::TableNextColumn(); ImGui::Text(g_selected_link->type == 4 ? "Resist Coeff R" : (p1Label + " Coeff a2").c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%s", g_selected_link->type == 4 ? "Resist Coeff R" : (p1Label + " Coeff a2").c_str());
                         ImGui::TableNextColumn();
                         double g_a2_val = g_selected_link->g_a2;
                         ImGui::PushItemWidth(-FLT_MIN);
@@ -2755,8 +2536,8 @@ void RenderUI() {
                         if (ImGui::IsItemActivated()) { PushUndoState(); }
                         ImGui::PopItemWidth();
                         std::string g_a2Unit = g_selected_link->type == 4 ? "Pa/(m/s)" : p1Unit + "/K2";
-                        ImGui::TableNextColumn(); ImGui::Text(g_a2Unit.c_str());
-                        ImGui::TableNextColumn(); ImGui::Text(g_selected_link->type == 4 ? "System linear flow resistance" : "Quadratic temp coefficient a2");
+                        ImGui::TableNextColumn(); ImGui::Text("%s", g_a2Unit.c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%s", g_selected_link->type == 4 ? "System linear flow resistance" : "Quadratic temp coefficient a2");
                         
                         // Parameter 2 (Flow direction or v_max)
                         if (g_selected_link->type == 3) {
@@ -2827,8 +2608,8 @@ void RenderUI() {
                 ImGui::SameLine();
                 if (ImGui::Button("Print History to Log")) {
                     for (const auto& n : g_nodes) {
-                        auto& temps = g_temp_history[n.id];
-                        std::string msg = n.name + " history (size=" + std::to_string(temps.size()) + "): ";
+                        auto& temps = g_temp_history[n->id];
+                        std::string msg = n->name + " history (size=" + std::to_string(temps.size()) + "): ";
                         for (size_t i = 0; i < std::min(temps.size(), (size_t)10); ++i) {
                             msg += std::to_string(temps[i]) + ", ";
                         }
@@ -2839,12 +2620,12 @@ void RenderUI() {
                 ImGui::Text("Toggled Series:");
                 ImGui::BeginChild("PlotSelectorsList", ImVec2(0, 70), true);
                 for (auto& n : g_nodes) {
-                    bool visible = g_plot_active_nodes[n.id];
-                    if (ImGui::Checkbox(n.name.c_str(), &visible)) {
-                        g_plot_active_nodes[n.id] = visible;
+                    bool visible = g_plot_active_nodes[n->id];
+                    if (ImGui::Checkbox(n->name.c_str(), &visible)) {
+                        g_plot_active_nodes[n->id] = visible;
                     }
                     ImGui::SameLine(180.0f);
-                    ImGui::TextDisabled("N:%d", n.id);
+                    ImGui::TextDisabled("N:%d", n->id);
                 }
                 ImGui::EndChild();
                 
@@ -2861,8 +2642,8 @@ void RenderUI() {
                     double y_max = 95.0;
                     bool has_data = false;
                     for (const auto& n : g_nodes) {
-                        if (!g_plot_active_nodes[n.id]) continue;
-                        auto& temps = g_temp_history[n.id];
+                        if (!g_plot_active_nodes[n->id]) continue;
+                        auto& temps = g_temp_history[n->id];
                         for (double t : temps) {
                             if (!has_data) {
                                 y_min = t;
@@ -2889,10 +2670,10 @@ void RenderUI() {
                     ImPlot::SetupAxisLimits(ImAxis_Y1, y_min, y_max, g_is_running ? ImGuiCond_Always : ImGuiCond_Once);
                     
                     for (const auto& n : g_nodes) {
-                        if (!g_plot_active_nodes[n.id]) continue;
-                        auto& temps = g_temp_history[n.id];
+                        if (!g_plot_active_nodes[n->id]) continue;
+                        auto& temps = g_temp_history[n->id];
                         if (!temps.empty() && !g_time_history.empty()) {
-                            ImPlot::PlotLine(n.name.c_str(), g_time_history.data(), temps.data(), (int)g_time_history.size());
+                            ImPlot::PlotLine(n->name.c_str(), g_time_history.data(), temps.data(), (int)g_time_history.size());
                         }
                     }
                     ImPlot::EndPlot();
@@ -3003,8 +2784,8 @@ void RenderUI() {
             if (!g_nodes.empty()) {
                 double maxT = -1e9, minT = 1e9;
                 for (const auto& n : g_nodes) {
-                    if (n.temp > maxT) maxT = n.temp;
-                    if (n.temp < minT) minT = n.temp;
+                    if (n->temp > maxT) maxT = n->temp;
+                    if (n->temp < minT) minT = n->temp;
                 }
                 
                 ImGui::TableNextRow();
@@ -3017,7 +2798,7 @@ void RenderUI() {
                 
                 double totalQ = 0.0;
                 for (const auto& n : g_nodes) {
-                    if (!n.is_fixed) totalQ += n.q_gen;
+                    if (!n->is_fixed) totalQ += n->q_gen;
                 }
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn(); ImGui::Text("Net Heater Output");
@@ -3105,27 +2886,36 @@ void RenderUI() {
         }
         ImGui::SameLine();
         if (ImGui::Button("Create Link", ImVec2(120, 0))) {
-            int nextId = g_links.empty() ? 101 : std::max_element(g_links.begin(), g_links.end(), [](const DesktopLink& a, const DesktopLink& b){ return a.id < b.id; })->id + 1;
+            int nextId = g_links.empty() ? 101 : (*std::max_element(g_links.begin(), g_links.end(), [](const std::shared_ptr<DesktopLink>& a, const std::shared_ptr<DesktopLink>& b){ return a->id < b->id; }))->id + 1;
             double p1_val = g_modal_link_p1;
             double p2_val = g_modal_link_p2;
             if (g_modal_link_type == 4) {
                 if (p1_val == 10.0) p1_val = 1000.0;
                 if (p2_val == 1.0) p2_val = 10.0;
             }
-            DesktopLink newLink = { nextId, g_modal_node_a_id, g_modal_node_b_id, g_modal_link_type, p1_val, p2_val, 0.0, 0.0, 0.005 };
+            auto newLink = std::make_shared<DesktopLink>();
+            newLink->id = nextId;
+            newLink->node_a = g_modal_node_a_id;
+            newLink->node_b = g_modal_node_b_id;
+            newLink->type = g_modal_link_type;
+            newLink->p1 = p1_val;
+            newLink->p2 = p2_val;
+            newLink->g_a1 = 0.0;
+            newLink->g_a2 = 0.0;
+            newLink->fan_area = 0.005;
             g_links.push_back(newLink);
             
             SyncSystemWithSolver();
             g_show_link_modal = false;
-            g_selected_link = &g_links.back();
+            g_selected_link = newLink;
             g_selected_node = nullptr;
             
-            Log("Created connection link N:" + std::to_string(newLink.node_a) + " -> N:" + std::to_string(newLink.node_b), "info");
+            Log("Created connection link N:" + std::to_string(newLink->node_a) + " -> N:" + std::to_string(newLink->node_b), "info");
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
-}
+} // End RenderUI()
 
 void SaveModel() {
     OPENFILENAMEW ofn;
@@ -3151,29 +2941,36 @@ void SaveModel() {
             nlohmann::json j_nodes = nlohmann::json::array();
             for (const auto& n : g_nodes) {
                 nlohmann::json jn;
-                jn["id"] = n.id;
-                jn["name"] = n.name;
-                jn["x"] = n.x;
-                jn["y"] = n.y;
-                jn["temp"] = n.temp;
-                jn["capacity"] = n.capacity;
-                jn["q_gen"] = n.q_gen;
-                jn["is_fixed"] = n.is_fixed;
-                jn["temp_init"] = n.temp_init;
-                jn["c_a1"] = n.c_a1;
-                jn["c_a2"] = n.c_a2;
-                jn["material"] = n.material;
-                jn["mass"] = n.mass;
-                jn["domain"] = n.domain;
-                jn["fluid_medium"] = n.fluid_medium;
-                jn["fluid_volume"] = n.fluid_volume;
-                jn["fluid_mix_ratio"] = n.fluid_mix_ratio;
-                jn["fluid_rho_a0"] = n.fluid_rho_a0;
-                jn["fluid_rho_a1"] = n.fluid_rho_a1;
-                jn["fluid_rho_a2"] = n.fluid_rho_a2;
-                jn["fluid_cp_a0"] = n.fluid_cp_a0;
-                jn["fluid_cp_a1"] = n.fluid_cp_a1;
-                jn["fluid_cp_a2"] = n.fluid_cp_a2;
+                jn["id"] = n->id;
+                jn["name"] = n->name;
+                jn["x"] = n->x;
+                jn["y"] = n->y;
+                jn["temp"] = n->temp;
+                jn["capacity"] = n->capacity;
+                jn["q_gen"] = n->q_gen;
+                jn["is_fixed"] = n->is_fixed;
+                jn["temp_init"] = n->temp_init;
+                jn["c_a1"] = n->c_a1;
+                jn["c_a2"] = n->c_a2;
+                jn["material"] = n->material;
+                jn["mass"] = n->mass;
+                jn["domain"] = n->domain;
+                jn["fluid_medium"] = n->fluid_medium;
+                jn["fluid_volume"] = n->fluid_volume;
+                jn["fluid_mix_ratio"] = n->fluid_mix_ratio;
+                jn["fluid_rho_a0"] = n->fluid_rho_a0;
+                jn["fluid_rho_a1"] = n->fluid_rho_a1;
+                jn["fluid_rho_a2"] = n->fluid_rho_a2;
+                jn["fluid_cp_a0"] = n->fluid_cp_a0;
+                jn["fluid_cp_a1"] = n->fluid_cp_a1;
+                jn["fluid_cp_a2"] = n->fluid_cp_a2;
+                if (!n->params.empty()) {
+                    nlohmann::json jp = nlohmann::json::object();
+                    for (const auto& pair : n->params) {
+                        jp[pair.first] = pair.second;
+                    }
+                    jn["params"] = jp;
+                }
                 j_nodes.push_back(jn);
             }
             j["nodes"] = j_nodes;
@@ -3182,15 +2979,15 @@ void SaveModel() {
             nlohmann::json j_links = nlohmann::json::array();
             for (const auto& l : g_links) {
                 nlohmann::json jl;
-                jl["id"] = l.id;
-                jl["node_a"] = l.node_a;
-                jl["node_b"] = l.node_b;
-                jl["type"] = l.type;
-                jl["p1"] = l.p1;
-                jl["p2"] = l.p2;
-                jl["g_a1"] = l.g_a1;
-                jl["g_a2"] = l.g_a2;
-                jl["fan_area"] = l.fan_area;
+                jl["id"] = l->id;
+                jl["node_a"] = l->node_a;
+                jl["node_b"] = l->node_b;
+                jl["type"] = l->type;
+                jl["p1"] = l->p1;
+                jl["p2"] = l->p2;
+                jl["g_a1"] = l->g_a1;
+                jl["g_a2"] = l->g_a2;
+                jl["fan_area"] = l->fan_area;
                 j_links.push_back(jl);
             }
             j["links"] = j_links;
@@ -3282,35 +3079,77 @@ void LoadModel() {
             // Deserialize nodes
             if (j.contains("nodes") && j["nodes"].is_array()) {
                 for (const auto& jn : j["nodes"]) {
-                    DesktopNode n;
-                    n.id = jn["id"];
-                    n.name = jn["name"].get<std::string>();
-                    n.x = jn["x"];
-                    n.y = jn["y"];
-                    n.temp = jn["temp"];
-                    n.capacity = jn["capacity"];
-                    n.q_gen = jn["q_gen"];
-                    n.is_fixed = jn["is_fixed"];
+                    std::string nodeName = jn["name"].get<std::string>();
+                    std::shared_ptr<DesktopNode> n;
+                    if (nodeName == "Engine Block") {
+                        auto engine = std::make_shared<EngineBlockNode>();
+                        engine->jacketNode->id = jn["id"] + 1;
+                        engine->internalCond->id = jn["id"] + 2;
+                        engine->internalCond->node_a = jn["id"];
+                        engine->internalCond->node_b = engine->jacketNode->id;
+                        n = engine;
+                    } else if (nodeName == "Radiator") {
+                        auto radiator = std::make_shared<RadiatorNode>();
+                        radiator->coreNode->id = jn["id"] + 1;
+                        radiator->internalConv->id = jn["id"] + 2;
+                        radiator->internalConv->node_a = jn["id"];
+                        radiator->internalConv->node_b = radiator->coreNode->id;
+                        n = radiator;
+                    } else if (nodeName == "Ambient Air") {
+                        n = std::make_shared<AmbientAirNode>();
+                    } else {
+                        n = std::make_shared<DesktopNode>();
+                    }
+                    n->id = jn["id"];
+                    n->name = nodeName;
+                    n->x = jn["x"];
+                    n->y = jn["y"];
+                    n->temp = jn["temp"];
+                    n->capacity = jn["capacity"];
+                    n->q_gen = jn["q_gen"];
+                    n->is_fixed = jn["is_fixed"];
                     
                     if (jn.contains("temp_init")) {
-                        n.temp_init = jn["temp_init"];
+                        n->temp_init = jn["temp_init"];
                     } else {
-                        n.temp_init = n.temp;
+                        n->temp_init = n->temp;
                     }
-                    n.c_a1 = jn.contains("c_a1") ? jn["c_a1"].get<double>() : 0.0;
-                    n.c_a2 = jn.contains("c_a2") ? jn["c_a2"].get<double>() : 0.0;
-                    n.material = jn.contains("material") ? jn["material"].get<std::string>() : "Custom";
-                    n.mass = jn.contains("mass") ? jn["mass"].get<double>() : 1.0;
-                    n.domain = jn.contains("domain") ? jn["domain"].get<int>() : 0;
-                    n.fluid_medium = jn.contains("fluid_medium") ? jn["fluid_medium"].get<std::string>() : "Water";
-                    n.fluid_volume = jn.contains("fluid_volume") ? jn["fluid_volume"].get<double>() : 1.0;
-                    n.fluid_mix_ratio = jn.contains("fluid_mix_ratio") ? jn["fluid_mix_ratio"].get<double>() : 0.5;
-                    n.fluid_rho_a0 = jn.contains("fluid_rho_a0") ? jn["fluid_rho_a0"].get<double>() : 1000.0;
-                    n.fluid_rho_a1 = jn.contains("fluid_rho_a1") ? jn["fluid_rho_a1"].get<double>() : 0.0;
-                    n.fluid_rho_a2 = jn.contains("fluid_rho_a2") ? jn["fluid_rho_a2"].get<double>() : 0.0;
-                    n.fluid_cp_a0 = jn.contains("fluid_cp_a0") ? jn["fluid_cp_a0"].get<double>() : 4184.0;
-                    n.fluid_cp_a1 = jn.contains("fluid_cp_a1") ? jn["fluid_cp_a1"].get<double>() : 0.0;
-                    n.fluid_cp_a2 = jn.contains("fluid_cp_a2") ? jn["fluid_cp_a2"].get<double>() : 0.0;
+                    n->c_a1 = jn.contains("c_a1") ? jn["c_a1"].get<double>() : 0.0;
+                    n->c_a2 = jn.contains("c_a2") ? jn["c_a2"].get<double>() : 0.0;
+                    n->material = jn.contains("material") ? jn["material"].get<std::string>() : "Custom";
+                    n->mass = jn.contains("mass") ? jn["mass"].get<double>() : 1.0;
+                    n->domain = jn.contains("domain") ? jn["domain"].get<int>() : 0;
+                    n->fluid_medium = jn.contains("fluid_medium") ? jn["fluid_medium"].get<std::string>() : "Water";
+                    n->fluid_volume = jn.contains("fluid_volume") ? jn["fluid_volume"].get<double>() : 1.0;
+                    n->fluid_mix_ratio = jn.contains("fluid_mix_ratio") ? jn["fluid_mix_ratio"].get<double>() : 0.5;
+                    n->fluid_rho_a0 = jn.contains("fluid_rho_a0") ? jn["fluid_rho_a0"].get<double>() : 1000.0;
+                    n->fluid_rho_a1 = jn.contains("fluid_rho_a1") ? jn["fluid_rho_a1"].get<double>() : 0.0;
+                    n->fluid_rho_a2 = jn.contains("fluid_rho_a2") ? jn["fluid_rho_a2"].get<double>() : 0.0;
+                    n->fluid_cp_a0 = jn.contains("fluid_cp_a0") ? jn["fluid_cp_a0"].get<double>() : 4184.0;
+                    n->fluid_cp_a1 = jn.contains("fluid_cp_a1") ? jn["fluid_cp_a1"].get<double>() : 0.0;
+                    n->fluid_cp_a2 = jn.contains("fluid_cp_a2") ? jn["fluid_cp_a2"].get<double>() : 0.0;
+
+                    if (jn.contains("params") && jn["params"].is_object()) {
+                        for (auto& item : jn["params"].items()) {
+                            n->params[item.key()] = item.value().get<double>();
+                        }
+                        // Re-sync params to sub-node properties
+                        if (nodeName == "Engine Block") {
+                            auto engine = std::static_pointer_cast<EngineBlockNode>(n);
+                            engine->capacity = engine->params["block_capacity"];
+                            engine->q_gen = engine->params["heat_rejection"];
+                            engine->jacketNode->fluid_volume = engine->params["jacket_volume"];
+                            engine->internalCond->p1 = engine->params["block_jacket_cond"];
+                        } else if (nodeName == "Radiator") {
+                            auto radiator = std::static_pointer_cast<RadiatorNode>(n);
+                            radiator->fluid_volume = radiator->params["coolant_volume"];
+                            radiator->coreNode->capacity = radiator->params["core_capacity"];
+                            radiator->internalConv->p1 = radiator->params["coolant_hA"];
+                        } else if (nodeName == "Ambient Air") {
+                            n->temp = n->params["temp_c"];
+                            n->temp_init = n->params["temp_c"];
+                        }
+                    }
                     g_nodes.push_back(n);
                 }
             }
@@ -3318,16 +3157,16 @@ void LoadModel() {
             // Deserialize links
             if (j.contains("links") && j["links"].is_array()) {
                 for (const auto& jl : j["links"]) {
-                    DesktopLink l;
-                    l.id = jl["id"];
-                    l.node_a = jl["node_a"];
-                    l.node_b = jl["node_b"];
-                    l.type = jl["type"];
-                    l.p1 = jl["p1"];
-                    l.p2 = jl["p2"];
-                    l.g_a1 = jl.contains("g_a1") ? jl["g_a1"].get<double>() : 0.0;
-                    l.g_a2 = jl.contains("g_a2") ? jl["g_a2"].get<double>() : 0.0;
-                    l.fan_area = jl.contains("fan_area") ? jl["fan_area"].get<double>() : 0.005;
+                    auto l = std::make_shared<DesktopLink>();
+                    l->id = jl["id"];
+                    l->node_a = jl["node_a"];
+                    l->node_b = jl["node_b"];
+                    l->type = jl["type"];
+                    l->p1 = jl["p1"];
+                    l->p2 = jl["p2"];
+                    l->g_a1 = jl.contains("g_a1") ? jl["g_a1"].get<double>() : 0.0;
+                    l->g_a2 = jl.contains("g_a2") ? jl["g_a2"].get<double>() : 0.0;
+                    l->fan_area = jl.contains("fan_area") ? jl["fan_area"].get<double>() : 0.005;
                     g_links.push_back(l);
                 }
             }
@@ -3359,7 +3198,7 @@ void LoadModel() {
             
             g_plot_active_nodes.clear();
             for (const auto& n : g_nodes) {
-                g_plot_active_nodes[n.id] = true;
+                g_plot_active_nodes[n->id] = true;
             }
             
             ApplySlidersToSystem();
@@ -3398,7 +3237,7 @@ void resetSimulation() {
     
     // Reset temperatures back to initial user configuration
     for (auto& n : g_nodes) {
-        n.temp = n.temp_init;
+        n->temp = n->temp_init;
     }
     
     SyncSystemWithSolver();
@@ -3413,12 +3252,12 @@ void deleteSelected() {
     if (g_selected_node) {
         int id = g_selected_node->id;
         // Erase connected links first
-        g_links.erase(std::remove_if(g_links.begin(), g_links.end(), [&](const DesktopLink& l) {
-            return l.node_a == id || l.node_b == id;
+        g_links.erase(std::remove_if(g_links.begin(), g_links.end(), [&](const std::shared_ptr<DesktopLink>& l) {
+            return l->node_a == id || l->node_b == id;
         }), g_links.end());
         // Erase node
-        g_nodes.erase(std::remove_if(g_nodes.begin(), g_nodes.end(), [&](const DesktopNode& n) {
-            return n.id == id;
+        g_nodes.erase(std::remove_if(g_nodes.begin(), g_nodes.end(), [&](const std::shared_ptr<DesktopNode>& n) {
+            return n->id == id;
         }), g_nodes.end());
         
         Log("Deleted node component " + std::to_string(id), "warning");
@@ -3426,8 +3265,8 @@ void deleteSelected() {
     } 
     else if (g_selected_link) {
         int id = g_selected_link->id;
-        g_links.erase(std::remove_if(g_links.begin(), g_links.end(), [&](const DesktopLink& l) {
-            return l.id == id;
+        g_links.erase(std::remove_if(g_links.begin(), g_links.end(), [&](const std::shared_ptr<DesktopLink>& l) {
+            return l->id == id;
         }), g_links.end());
         
         Log("Deleted connection link " + std::to_string(id), "warning");

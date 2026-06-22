@@ -16,34 +16,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// ─── DesktopNode / DesktopLink minimal declarations (match main.cpp exactly) ──
-struct DesktopNode {
-    int id;
-    std::string name;
-    float x, y;
-    double temp;
-    double capacity;
-    double q_gen;
-    bool is_fixed;
-    double temp_init = 25.0;
-    double c_a1 = 0.0, c_a2 = 0.0;
-    std::string material = "Custom";
-    double mass = 1.0;
-    int domain = 0;
-    std::string fluid_medium = "Water";
-    double fluid_volume = 1.0;
-    double fluid_mix_ratio = 0.5;
-    double fluid_rho_a0 = 1000.0, fluid_rho_a1 = 0.0, fluid_rho_a2 = 0.0;
-    double fluid_cp_a0 = 4184.0, fluid_cp_a1 = 0.0, fluid_cp_a2 = 0.0;
-};
-
-struct DesktopLink {
-    int id, node_a, node_b, type;
-    double p1, p2;
-    double g_a1 = 0.0, g_a2 = 0.0;
-    double fan_area = 0.005;
-};
-
 // ─── DRAWING HELPERS ──────────────────────────────────────────────────────────
 
 static ImU32 TempToColor(double tempC) {

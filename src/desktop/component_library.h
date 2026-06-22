@@ -7,15 +7,9 @@
 #include <vector>
 #include <functional>
 #include "../../thirdparty/imgui/imgui.h"
+#include "sim_elements.h"
 
 // ─── Port Types ────────────────────────────────────────────────────────────────
-enum class PortType {
-    Coolant,      // Liquid coolant loop (blue)
-    Air,          // Airflow (light grey)
-    Heat,         // Conduction/radiation heat path (red)
-    Oil,          // Oil circuit (amber)
-    Any           // Unconstrained (for generic nodes)
-};
 
 inline const char* PortTypeName(PortType t) {
     switch (t) {
@@ -27,15 +21,7 @@ inline const char* PortTypeName(PortType t) {
     }
 }
 
-inline ImU32 PortTypeColor(PortType t) {
-    switch (t) {
-        case PortType::Coolant: return IM_COL32(59, 130, 246, 255);   // Blue
-        case PortType::Air:     return IM_COL32(156, 163, 175, 255);  // Grey
-        case PortType::Heat:    return IM_COL32(239, 68, 68, 255);    // Red
-        case PortType::Oil:     return IM_COL32(245, 158, 11, 255);   // Amber
-        default:                return IM_COL32(200, 200, 200, 255);
-    }
-}
+
 
 inline bool PortTypesCompatible(PortType a, PortType b) {
     return true;
@@ -186,8 +172,6 @@ void DrawPorts(ImDrawList* dl, const ComponentDef& def, ImVec2 centre, float zoo
 
 // Compile component + connection graph into flat DesktopNode/DesktopLink vectors
 // Returns false if compilation fails
-struct DesktopNode;
-struct DesktopLink;
 bool CompileComponentGraph(
     const std::vector<CompInstance>&   instances,
     const std::vector<CompConnection>& connections,
