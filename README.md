@@ -41,6 +41,9 @@
 ### 🖥️ Desktop Application
 
 - Native Windows app using **Dear ImGui + ImPlot + DirectX 11**
+- **Physical Component Library** — Place standard ICE cooling components directly on the canvas:
+  - *Engine Block, Radiator, Radiator Fan, Water Pump, Thermostat, Coolant Hose, Oil Cooler, Heater Core, Expansion Tank, and Ambient Air*
+  - Auto-compiles component/connection graphs into the flat solver representation
 - Schematic editor with grid snap, zoom/pan, multi-select
 - Full Attribute Sheet editing for all component types
 - **ImPlot Fan Matcher** panel — fan & resistance curves with operating point marker
