@@ -210,6 +210,122 @@ static const ComponentDef* GetInstDef(const CompInstance& inst) {
     return GetCompDefById(inst.defId);
 }
 
+static bool g_reset_dockspace = false;
+
+// Safely resolve selection and drag pointers after vectors are modified/reallocated
+static void ResolvePointers() {
+    if (g_selected_node != nullptr) {
+        int targetId = g_selected_node->id;
+        DesktopNode* foundNode = nullptr;
+        for (auto& n : g_nodes) {
+            if (n.id == targetId) {
+                foundNode = &n;
+                break;
+            }
+        }
+        g_selected_node = foundNode;
+    }
+    if (dragNode != nullptr) {
+        int targetId = dragNode->id;
+        DesktopNode* foundNode = nullptr;
+        for (auto& n : g_nodes) {
+            if (n.id == targetId) {
+                foundNode = &n;
+                break;
+            }
+        }
+        dragNode = foundNode;
+    }
+    if (g_linking_start_node != nullptr) {
+        int targetId = g_linking_start_node->id;
+        DesktopNode* foundNode = nullptr;
+        for (auto& n : g_nodes) {
+            if (n.id == targetId) {
+                foundNode = &n;
+                break;
+            }
+        }
+        g_linking_start_node = foundNode;
+    }
+    if (g_selected_link != nullptr) {
+        int targetId = g_selected_link->id;
+        DesktopLink* foundLink = nullptr;
+        for (auto& l : g_links) {
+            if (l.id == targetId) {
+                foundLink = &l;
+                break;
+            }
+        }
+        g_selected_link = foundLink;
+    }
+    if (g_sel_comp != nullptr) {
+        int targetId = g_sel_comp->instId;
+        CompInstance* foundComp = nullptr;
+        for (auto& inst : g_comp_instances) {
+            if (inst.instId == targetId) {
+                foundComp = &inst;
+                break;
+            }
+        }
+        g_sel_comp = foundComp;
+    }
+    if (g_sel_conn != nullptr) {
+        int targetId = g_sel_conn->connId;
+        CompConnection* foundConn = nullptr;
+        for (auto& conn : g_comp_connections) {
+            if (conn.connId == targetId) {
+                foundConn = &conn;
+                break;
+            }
+        }
+        g_sel_conn = foundConn;
+    }
+}
+
+// Synchronise selection between components and generic nodes
+static void SyncSelection() {
+    ResolvePointers();
+    if (g_comp_mode) {
+        if (g_sel_comp != nullptr) {
+            if (!g_sel_comp->solverNodeIds.empty()) {
+                int firstNodeId = g_sel_comp->solverNodeIds[0];
+                bool found = false;
+                for (auto& n : g_nodes) {
+                    if (n.id == firstNodeId) {
+                        g_selected_node = &n;
+                        g_selected_link = nullptr;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) g_selected_node = nullptr;
+            } else {
+                g_selected_node = nullptr;
+            }
+        } else {
+            g_selected_node = nullptr;
+        }
+    } else {
+        if (g_selected_node != nullptr) {
+            bool found = false;
+            for (auto& inst : g_comp_instances) {
+                for (int nid : inst.solverNodeIds) {
+                    if (nid == g_selected_node->id) {
+                        g_sel_comp = &inst;
+                        g_sel_conn = nullptr;
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+            if (!found) g_sel_comp = nullptr;
+        } else {
+            g_sel_comp = nullptr;
+        }
+    }
+}
+
 // Compile component graph and sync solver
 static void SyncComponentsWithSolver() {
     if (!g_comp_mode) return;
@@ -219,6 +335,7 @@ static void SyncComponentsWithSolver() {
     CompileComponentGraph(g_comp_instances, g_comp_connections, lib, newNodes, newLinks);
     g_nodes = newNodes;
     g_links = newLinks;
+    ResolvePointers();
     SyncSystemWithSolver();
     ResetHistory();
 }
@@ -807,6 +924,10 @@ void LoadPreset(const std::string& key) {
     g_sliders.clear();
     g_selected_node = nullptr;
     g_selected_link = nullptr;
+    g_comp_instances.clear();
+    g_comp_connections.clear();
+    g_sel_comp = nullptr;
+    g_sel_conn = nullptr;
     g_sim_time = 0.0;
     g_is_running = false;
     g_undo_stack.clear();
@@ -1089,6 +1210,12 @@ void RenderUI() {
             if (ImGui::MenuItem("Reset Solver")) { resetSimulation(); }
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("View")) {
+            if (ImGui::MenuItem("Reset Layout")) {
+                g_reset_dockspace = true;
+            }
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Options")) {
             ImGui::MenuItem("Grid Snapping", nullptr, &g_grid_snap);
             ImGui::EndMenu();
@@ -1363,6 +1490,8 @@ void RenderUI() {
             if (ImGui::BeginTabItem("Physical Library", nullptr, fComp)) {
                 if (!g_comp_mode) {
                     g_comp_mode = true;
+                    SyncComponentsWithSolver();
+                    SyncSelection();
                     Log("Switched to Physical Component Library mode.", "success");
                 }
                 ImGui::EndTabItem();
@@ -1370,6 +1499,7 @@ void RenderUI() {
             if (ImGui::BeginTabItem("Generic Node/Link", nullptr, fGen)) {
                 if (g_comp_mode) {
                     g_comp_mode = false;
+                    SyncSelection();
                     Log("Switched to Generic Node/Link mode.", "info");
                 }
                 ImGui::EndTabItem();

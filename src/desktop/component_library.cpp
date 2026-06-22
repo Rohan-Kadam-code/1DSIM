@@ -910,8 +910,126 @@ bool CompileComponentGraph(
         }
     }
 
-    // Step 3: Add connections between components as LINK_FLOW links
-    for (const auto& conn : connections) {
+    // Keep track of which connections are processed
+    std::vector<bool> connProcessed(connections.size(), false);
+
+    // Process link-only components (components with no internal nodes, like RadiatorFan and WaterPump)
+    for (const auto& inst : instances) {
+        const ComponentDef* def = GetCompDefById(inst.defId);
+        if (!def || !def->nodes.empty()) continue; // skip components with nodes
+
+        // It is a link-only component! Find its input and output ports.
+        std::string inputPortId = "";
+        std::string outputPortId = "";
+        for (const auto& p : def->ports) {
+            if (!p.isOutput) inputPortId = p.id;
+            else outputPortId = p.id;
+        }
+
+        // Find connections connected to this instance's input and output ports
+        int inputConnIdx = -1;
+        int outputConnIdx = -1;
+        for (size_t i = 0; i < connections.size(); ++i) {
+            const auto& conn = connections[i];
+            if (conn.fromInstId == inst.instId && conn.fromPortId == inputPortId) inputConnIdx = (int)i;
+            else if (conn.toInstId == inst.instId && conn.toPortId == inputPortId) inputConnIdx = (int)i;
+            
+            if (conn.fromInstId == inst.instId && conn.fromPortId == outputPortId) outputConnIdx = (int)i;
+            else if (conn.toInstId == inst.instId && conn.toPortId == outputPortId) outputConnIdx = (int)i;
+        }
+
+        // We can only compile if both inlet and outlet are connected
+        if (inputConnIdx < 0 || outputConnIdx < 0) continue;
+
+        const auto& inConn = connections[inputConnIdx];
+        const auto& outConn = connections[outputConnIdx];
+
+        // Resolve the other end of the input connection (upstream node)
+        int upstreamInstId = (inConn.fromInstId == inst.instId) ? inConn.toInstId : inConn.fromInstId;
+        std::string upstreamPortId = (inConn.fromInstId == inst.instId) ? inConn.toPortId : inConn.fromPortId;
+
+        // Resolve the other end of the output connection (downstream node)
+        int downstreamInstId = (outConn.fromInstId == inst.instId) ? outConn.toInstId : outConn.fromInstId;
+        std::string downstreamPortId = (outConn.fromInstId == inst.instId) ? outConn.toPortId : outConn.fromPortId;
+
+        // Find instances of upstream and downstream components
+        const CompInstance* upstreamInst = nullptr;
+        const CompInstance* downstreamInst = nullptr;
+        for (const auto& otherInst : instances) {
+            if (otherInst.instId == upstreamInstId) upstreamInst = &otherInst;
+            if (otherInst.instId == downstreamInstId) downstreamInst = &otherInst;
+        }
+        if (!upstreamInst || !downstreamInst) continue;
+
+        const ComponentDef* upstreamDef = GetCompDefById(upstreamInst->defId);
+        const ComponentDef* downstreamDef = GetCompDefById(downstreamInst->defId);
+        if (!upstreamDef || !downstreamDef) continue;
+
+        // Find local node IDs for those ports
+        int upstreamLocalNode = -1;
+        for (const auto& pm : upstreamDef->portNodeMap) {
+            if (pm.portId == upstreamPortId) { upstreamLocalNode = pm.localNodeId; break; }
+        }
+        int downstreamLocalNode = -1;
+        for (const auto& pm : downstreamDef->portNodeMap) {
+            if (pm.portId == downstreamPortId) { downstreamLocalNode = pm.localNodeId; break; }
+        }
+
+        if (upstreamLocalNode <= 0 || downstreamLocalNode <= 0) continue;
+
+        int nodeA = globalNodeId(upstreamInstId, upstreamLocalNode);
+        int nodeB = globalNodeId(downstreamInstId, downstreamLocalNode);
+
+        // Determine link type and parameters
+        int linkType = 3; // default flow
+        double p1 = 0.0;
+        double p2 = 0.0;
+        double g_a1 = 0.0;
+        double g_a2 = 0.0;
+        double fanArea = 0.005;
+
+        if (def->type == CompType::RadiatorFan) {
+            linkType = 4; // LINK_FAN
+            auto it = inst.params.find("p_max");
+            p1 = (it != inst.params.end()) ? it->second : 200.0;
+            it = inst.params.find("v_max");
+            p2 = (it != inst.params.end()) ? it->second : 12.0;
+            it = inst.params.find("K");
+            g_a1 = (it != inst.params.end()) ? it->second : 0.5;
+            it = inst.params.find("R");
+            g_a2 = (it != inst.params.end()) ? it->second : 2.0;
+            it = inst.params.find("fan_area");
+            fanArea = (it != inst.params.end()) ? it->second : 0.005;
+        } else if (def->type == CompType::WaterPump) {
+            linkType = 3; // LINK_FLOW
+            auto it = inst.params.find("flow_rate");
+            p1 = (it != inst.params.end()) ? it->second : 20.0;
+            p2 = 1.0; // direction positive (A->B)
+        }
+
+        DesktopLink dl;
+        dl.id       = linkIdCounter++;
+        dl.node_a   = nodeA;
+        dl.node_b   = nodeB;
+        dl.type     = linkType;
+        dl.p1       = p1;
+        dl.p2       = p2;
+        dl.g_a1     = g_a1;
+        dl.g_a2     = g_a2;
+        dl.fan_area = fanArea;
+        outLinks.push_back(dl);
+
+        // Mark these connections as processed
+        connProcessed[inputConnIdx] = true;
+        connProcessed[outputConnIdx] = true;
+    }
+
+    // Step 3: Add remaining connections between components as LINK_FLOW / Convection links
+    for (size_t i = 0; i < connections.size(); ++i) {
+        if (connProcessed[i]) continue; // Already compiled via link-only component!
+
+        const auto& conn = connections[i];
+        
         // Find from-component def and which local node "fromPort" maps to
         const CompInstance* fromInst = nullptr;
         const CompInstance* toInst   = nullptr;
@@ -934,19 +1052,13 @@ bool CompileComponentGraph(
             if (pm.portId == conn.toPortId) { toLocalNode = pm.localNodeId; break; }
         }
 
-        // Fan components (RadiatorFan, WaterPump) have no internal nodes —
-        // they become a LINK_FAN or LINK_FLOW directly on the connection
+        // If one of them is fan-like but wasn't processed (e.g. single-connected), skip it
         bool fromIsFanLike = fromDef->nodes.empty();
         bool toIsFanLike   = toDef->nodes.empty();
+        if (fromIsFanLike || toIsFanLike) continue;
 
-        if (fromIsFanLike && toIsFanLike) continue;  // degenerate
-
-        int nodeA = -1, nodeB = -1;
-
-        if (!fromIsFanLike && fromLocalNode > 0)
-            nodeA = globalNodeId(conn.fromInstId, fromLocalNode);
-        if (!toIsFanLike && toLocalNode > 0)
-            nodeB = globalNodeId(conn.toInstId, toLocalNode);
+        int nodeA = globalNodeId(conn.fromInstId, fromLocalNode);
+        int nodeB = globalNodeId(conn.toInstId, toLocalNode);
 
         // Skip if we can't resolve both ends
         if (nodeA < 0 || nodeB < 0) continue;
@@ -961,32 +1073,6 @@ bool CompileComponentGraph(
             linkType = 1; // Convection for air connections
             p1 = 500.0;   // Default air-side hA
             p2 = 0.0;
-        }
-
-        // Special: if one side is a RadiatorFan — use LINK_FAN
-        auto isFanComp = [](const ComponentDef* def) {
-            return def->type == CompType::RadiatorFan;
-        };
-        if (isFanComp(fromDef) || isFanComp(toDef)) {
-            linkType = 4; // LINK_FAN
-            const CompInstance* fanInst = isFanComp(fromDef) ? fromInst : toInst;
-            auto it = fanInst->params.find("p_max");
-            p1 = (it != fanInst->params.end()) ? it->second : 200.0;
-            it = fanInst->params.find("v_max");
-            p2 = (it != fanInst->params.end()) ? it->second : 12.0;
-            it = fanInst->params.find("fan_area");
-            fanArea = (it != fanInst->params.end()) ? it->second : 0.005;
-        }
-
-        // Special: if one side is a WaterPump — use LINK_FLOW with pump's flow rate
-        auto isPumpComp = [](const ComponentDef* def) {
-            return def->type == CompType::WaterPump;
-        };
-        if (isPumpComp(fromDef) || isPumpComp(toDef)) {
-            linkType = 3; // LINK_FLOW
-            const CompInstance* pumpInst = isPumpComp(fromDef) ? fromInst : toInst;
-            auto it = pumpInst->params.find("flow_rate");
-            p1 = (it != pumpInst->params.end()) ? it->second : 20.0;
         }
 
         DesktopLink dl;

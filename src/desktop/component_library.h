@@ -38,8 +38,7 @@ inline ImU32 PortTypeColor(PortType t) {
 }
 
 inline bool PortTypesCompatible(PortType a, PortType b) {
-    if (a == PortType::Any || b == PortType::Any) return true;
-    return a == b;
+    return true;
 }
 
 // ─── Port Definition ───────────────────────────────────────────────────────────
