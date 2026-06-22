@@ -1,0 +1,7 @@
+-Isrc/core
+-Ithirdparty
+-Ithirdparty/imgui
+-Ithirdparty/imgui/backends
+-Ithirdparty/implot
+-std=c++17
+-DNOMINMAX

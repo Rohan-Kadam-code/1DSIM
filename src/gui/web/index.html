@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GT-ISE 1D Thermal Network Simulator</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Segoe+UI:wght@300;400;500;600;700&family=Consolas&display=swap" rel="stylesheet">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        
+        <!-- Standard GT Menu Bar -->
+        <nav class="menu-bar">
+            <div class="menu-item active">File</div>
+            <div class="menu-item">Edit</div>
+            <div class="menu-item">View</div>
+            <div class="menu-item">Model</div>
+            <div class="menu-item">Simulation</div>
+            <div class="menu-item">Tools</div>
+            <div class="menu-item">Help</div>
+            <div class="menu-spacer"></div>
+            <div class="app-title">GT-Thermal 1D - [Active Model: transient_cool.gtm]</div>
+        </nav>
+
+        <!-- Standard GT Ribbon / Toolbar -->
+        <header class="ribbon-toolbar">
+            <!-- Project File Operations -->
+            <div class="toolbar-section">
+                <span class="section-label">Model File</span>
+                <div class="button-row">
+                    <button class="btn-tb" id="btn-tb-new" title="New Model">📁 New</button>
+                    <button class="btn-tb" id="btn-tb-clear" title="Clear Workspace">🗑 Clear</button>
+                </div>
+            </div>
+            
+            <!-- Library presets -->
+            <div class="toolbar-section">
+                <span class="section-label">Library Templates</span>
+                <div class="button-row">
+                    <select id="preset-select" class="select-tb">
+                        <option value="vehicle" selected>Vehicle Cooling Loop</option>
+                        <option value="cpu">CPU Cooler Assembly</option>
+                        <option value="battery">Li-Ion Battery Liquid Cooling</option>
+                        <option value="window">Double-Pane Window Insulation</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Simulation Controls -->
+            <div class="toolbar-section">
+                <span class="section-label">Solver Control</span>
+                <div class="button-row">
+                    <button class="btn-tb btn-run" id="btn-play" title="Run Transient Simulation">▶ Run</button>
+                    <button class="btn-tb" id="btn-pause" title="Pause Simulation" disabled>⏸ Pause</button>
+                    <button class="btn-tb" id="btn-step" title="Solve Single Time Step">⏭ Step</button>
+                    <button class="btn-tb btn-steady" id="btn-steady" title="Solve Steady-State Balance">⚡ Steady State</button>
+                    <button class="btn-tb" id="btn-reset" title="Reset Simulation State">↩ Reset</button>
+                </div>
+            </div>
+
+            <!-- Solver Parameters -->
+            <div class="toolbar-section">
+                <span class="section-label">Solver Options</span>
+                <div class="button-row">
+                    <select id="solver-select" class="select-tb">
+                        <option value="rk4">Runge-Kutta 4 (RK4)</option>
+                        <option value="euler">Explicit Euler</option>
+                    </select>
+                    <div class="input-container">
+                        <label for="step-size">dt (s):</label>
+                        <input type="number" id="step-size" value="0.05" min="0.001" max="10" step="0.01" class="input-tb">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Editor Options -->
+            <div class="toolbar-section">
+                <span class="section-label">Editor</span>
+                <div class="button-row">
+                    <button class="btn-tb active" id="btn-snap" title="Toggle Grid Snapping">🎯 Grid Snap: ON</button>
+                    <button class="btn-tb" id="btn-export" title="Export Simulation Results to CSV">📤 Export CSV</button>
+                </div>
+            </div>
+            
+            <div class="toolbar-section time-section">
+                <span class="section-label">Simulation Clock</span>
+                <div class="sim-clock-display" id="time-display">0.00s</div>
+            </div>
+        </header>
+
+        <!-- Main Body -->
+        <div class="app-body">
+            
+            <!-- Left Panel: Library Explorer & Model Tree -->
+            <aside class="sidebar-left">
+                <!-- Object Library Palette -->
+                <div class="dock-panel">
+                    <div class="dock-header">Object Library</div>
+                    <div class="library-palette">
+                        <div class="palette-item" id="palette-node" title="Double click empty space to add a Node">
+                            <span class="palette-icon node-icon"></span>
+                            <span class="palette-text">Thermal Mass</span>
+                        </div>
+                        <div class="palette-item" id="palette-boundary" title="Create a boundary temperature node">
+                            <span class="palette-icon boundary-icon"></span>
+                            <span class="palette-text">Boundary Temp</span>
+                        </div>
+                        <div class="palette-item" id="palette-link-cond" title="Create conduction link">
+                            <span class="palette-icon link-cond-icon"></span>
+                            <span class="palette-text">Conduction</span>
+                        </div>
+                        <div class="palette-item" id="palette-link-conv" title="Create convection link">
+                            <span class="palette-icon link-conv-icon"></span>
+                            <span class="palette-text">Convection</span>
+                        </div>
+                        <div class="palette-item" id="palette-link-rad" title="Create radiation link">
+                            <span class="palette-icon link-rad-icon"></span>
+                            <span class="palette-text">Radiation</span>
+                        </div>
+                        <div class="palette-item" id="palette-link-flow" title="Create fluid advection link">
+                            <span class="palette-icon link-flow-icon"></span>
+                            <span class="palette-text">Coolant Flow</span>
+                        </div>
+                        <div class="palette-item" id="palette-link-fan" title="Create dynamic Fan/Pump link">
+                            <span class="palette-icon link-fan-icon"></span>
+                            <span class="palette-text">Fan / Pump</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Model Tree Explorer -->
+                <div class="dock-panel tree-panel">
+                    <div class="dock-header">Model Directory Tree</div>
+                    <div class="tree-content" id="model-tree">
+                        <!-- Hierarchical folders -->
+                        <div class="tree-folder open">
+                            <div class="tree-folder-title">📁 Thermal Nodes</div>
+                            <div class="tree-folder-items" id="tree-nodes-list"></div>
+                        </div>
+                        <div class="tree-folder open">
+                            <div class="tree-folder-title">📁 Connections (Links)</div>
+                            <div class="tree-folder-items" id="tree-links-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Center Panel: Diagram and Output Console -->
+            <div class="workspace-center">
+                <main class="canvas-container">
+                    <div class="canvas-toolbar">
+                        <span class="toolbar-title">Model Map (Schematic Layout)</span>
+                        <div class="canvas-actions">
+                            <button id="tool-select" class="canvas-btn-tool active">Select Tool</button>
+                            <button id="tool-link" class="canvas-btn-tool">Connect Link</button>
+                        </div>
+                    </div>
+                    <div class="canvas-wrapper">
+                        <canvas id="network-canvas"></canvas>
+                    </div>
+                </main>
+
+                <!-- Bottom Simulation Output Console -->
+                <footer class="console-panel">
+                    <div class="dock-header">
+                        <span>Simulation Output Log</span>
+                        <button id="btn-clear-console" class="btn-console-clear">Clear Log</button>
+                    </div>
+                    <div class="console-output" id="console-output">
+                        <div class="console-line info">[INFO] GT-Thermal 1D solver loaded successfully.</div>
+                        <div class="console-line info">[INFO] Select a preset scenario or load an existing model to begin.</div>
+                    </div>
+                </footer>
+            </div>
+
+            <!-- Right Sidebar: Properties Spreadsheet & Graph tabs -->
+            <aside class="sidebar-right">
+                <!-- Tab Headers -->
+                <div class="tab-headers">
+                    <div class="tab-btn active" data-tab="tab-props">Attribute Sheet</div>
+                    <div class="tab-btn" data-tab="tab-charts">Time Plots</div>
+                    <div class="tab-btn" data-tab="tab-vars">Dynamic Variables</div>
+                    <div class="tab-btn" id="tab-btn-fan" data-tab="tab-fan" style="display: none;">Fan Matcher</div>
+                </div>
+
+                <!-- Tab: Attribute Spreadsheet -->
+                <div class="tab-content active" id="tab-props">
+                    <div class="spreadsheet-container">
+                        <table class="spreadsheet-table">
+                            <thead>
+                                <tr>
+                                    <th>Parameter</th>
+                                    <th>Value</th>
+                                    <th>Unit</th>
+                                    <th>Description</th>
+                                </tr>
+                            </thead>
+                            <tbody id="spreadsheet-body">
+                                <tr>
+                                    <td colspan="4" class="empty-spreadsheet">No component selected. Click an element on the canvas to inspect its properties.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Tab: Chart/Plots -->
+                <div class="tab-content" id="tab-charts">
+                    <div class="chart-controls">
+                        <button class="btn-tb" id="btn-clear-chart">Clear Plot</button>
+                        <div class="series-check-list" id="series-selector-list">
+                            <!-- Populated with checkboxes for toggling series -->
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="temp-chart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Tab: Scenario Variables -->
+                <div class="tab-content" id="tab-vars">
+                    <div class="variables-panel" id="dynamic-sliders">
+                        <!-- Populated by presets -->
+                    </div>
+                </div>
+
+                <!-- Tab: Fan Matcher -->
+                <div class="tab-content" id="tab-fan">
+                    <div class="fan-matcher-container">
+                        <h4>Fan / Pump Curve Matcher</h4>
+                        <div class="fan-matcher-metrics">
+                            <div class="metric-row">
+                                <span class="metric-label">Operating Velocity:</span>
+                                <span id="fan-calc-v" class="metric-value">0.00 m/s</span>
+                            </div>
+                            <div class="metric-row">
+                                <span class="metric-label">Volumetric Flow Rate:</span>
+                                <span id="fan-calc-q" class="metric-value">0.00 L/min</span>
+                            </div>
+                            <div class="metric-row">
+                                <span class="metric-label">Operating Pressure:</span>
+                                <span id="fan-calc-p" class="metric-value">0.00 Pa</span>
+                            </div>
+                        </div>
+                        <div class="fan-chart-wrapper">
+                            <canvas id="fan-matching-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- System Diagnostics -->
+                <div class="dock-panel diagnostics-panel">
+                    <div class="dock-header">Diagnostics</div>
+                    <div class="diagnostics-content">
+                        <div class="diag-row">
+                            <span class="diag-name">Nodes (Active/Fixed)</span>
+                            <span class="diag-value" id="diag-nodes">0</span>
+                        </div>
+                        <div class="diag-row">
+                            <span class="diag-name">Connections Count</span>
+                            <span class="diag-value" id="diag-links">0</span>
+                        </div>
+                        <div class="diag-row">
+                            <span class="diag-name">Max System Temp</span>
+                            <span class="diag-value" id="diag-max-temp">--</span>
+                        </div>
+                        <div class="diag-row">
+                            <span class="diag-name">Min System Temp</span>
+                            <span class="diag-value" id="diag-min-temp">--</span>
+                        </div>
+                        <div class="diag-row">
+                            <span class="diag-name">Net Heat Source Power</span>
+                            <span class="diag-value" id="diag-energy-bal">--</span>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+            
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="add-link-overlay" class="modal-overlay hidden">
+        <div class="modal">
+            <h3>Configure Link Connection</h3>
+            <div class="form-group">
+                <label for="modal-link-type">Heat Transfer Type</label>
+                <select id="modal-link-type">
+                    <option value="0">Conduction</option>
+                    <option value="1">Convection</option>
+                    <option value="2">Radiation</option>
+                    <option value="3">Coolant Flow (Advection)</option>
+                    <option value="4">Fan / Pump Link</option>
+                </select>
+            </div>
+            <div class="form-group" id="group-p1">
+                <label for="modal-link-p1" id="label-p1">Thermal Conductance (W/K)</label>
+                <input type="number" id="modal-link-p1" value="10" step="0.1">
+            </div>
+            <div class="form-group hidden" id="group-p2">
+                <label for="modal-link-p2">Fluid Direction</label>
+                <select id="modal-link-p2">
+                    <option value="1.0">Node A to Node B</option>
+                    <option value="-1.0">Node B to Node A</option>
+                </select>
+            </div>
+            <div class="modal-buttons">
+                <button id="btn-modal-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="btn-modal-create" class="btn btn-primary">Create Connection</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+# Compiled binaries
+*.exe
+*.dll
+*.obj
+*.pdb
+*.exp
+*.lib
+*.ilk
+
+# Build cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# IDE files
+.vscode/
+*.suo
+*.user
+*.vsidx
+.vs/
+
+# ImGui user config (generated at runtime)
+imgui.ini
+
+# OS files
+Thumbs.db
+.DS_Store
