@@ -13,6 +13,7 @@
 #include <commdlg.h>
 
 #include "../core/solver.h"
+#include "component_library.h"
 #include "../../thirdparty/imgui/imgui.h"
 #include "../../thirdparty/imgui/imgui_internal.h"
 #include "../../thirdparty/imgui/backends/imgui_impl_win32.h"
@@ -41,6 +42,11 @@ void SyncSlidersFromSystem();
 void ApplySlidersToSystem();
 void SaveModel();
 void LoadModel();
+
+void SyncSystemWithSolver();
+void ResetHistory();
+void Log(const std::string& message, const std::string& type = "info");
+ImVec2 CanvasToScreen(ImVec2 local_pos, ImVec2 canvas_origin);
 
 // --- DX11 Global Variables ---
 static ID3D11Device*            g_pd3dDevice = nullptr;
@@ -171,6 +177,125 @@ static double                   g_modal_link_p2 = 1.0;
 static int                      g_modal_node_a_id = -1;
 static int                      g_modal_node_b_id = -1;
 
+// ─── COMPONENT LIBRARY STATE ─────────────────────────────────────────────────
+static std::vector<CompInstance>    g_comp_instances;   // placed components
+static std::vector<CompConnection>  g_comp_connections; // wired connections
+static CompInstance*                g_sel_comp = nullptr;  // selected component
+static CompConnection*              g_sel_conn = nullptr;  // selected connection
+
+// Component canvas tool state (tool 2 = Place Component)
+static std::string   g_pending_comp_type = "";   // defId being dragged from palette
+static bool          g_placing_component = false;  // cursor shows ghost
+
+// Port connection state (tool 3 = Connect Ports)
+static int           g_conn_from_inst = -1;
+static std::string   g_conn_from_port = "";
+static std::string   g_hovered_port_id = "";
+static int           g_hovered_port_inst = -1;
+
+// Library panel category
+static int           g_lib_tab = 0;   // 0=ICE
+
+// Running instance ID counter
+static int           g_next_inst_id = 1000;
+static int           g_next_conn_id = 2000;
+
+// Component mode flag (false = legacy node/link mode)
+static bool          g_comp_mode = false;
+
+// Helper: get def for a placed instance
+static const ComponentDef* GetInstDef(const CompInstance& inst) {
+    return GetCompDefById(inst.defId);
+}
+
+// Compile component graph and sync solver
+static void SyncComponentsWithSolver() {
+    if (!g_comp_mode) return;
+    const auto& lib = GetComponentLibrary();
+    std::vector<DesktopNode> newNodes;
+    std::vector<DesktopLink> newLinks;
+    CompileComponentGraph(g_comp_instances, g_comp_connections, lib, newNodes, newLinks);
+    g_nodes = newNodes;
+    g_links = newLinks;
+    SyncSystemWithSolver();
+    ResetHistory();
+}
+
+// Place a component instance at canvas position
+static void PlaceComponent(const std::string& defId, float cx, float cy) {
+    const ComponentDef* def = GetCompDefById(defId);
+    if (!def) return;
+    PushUndoState();
+    CompInstance inst;
+    inst.instId   = g_next_inst_id++;
+    inst.type     = def->type;
+    inst.defId    = defId;
+    inst.x        = cx;
+    inst.y        = cy;
+    inst.selected = false;
+    // Populate default params
+    for (const auto& p : def->params)
+        inst.params[p.key] = p.defaultValue;
+    // Initialise temp vector
+    inst.nodeTemps.resize(def->nodes.size(), 25.0);
+    g_comp_instances.push_back(inst);
+    SyncComponentsWithSolver();
+    Log("Placed component: " + def->name, "success");
+}
+
+// Draw all component instances on the canvas
+static void DrawComponentInstances(ImDrawList* dl, ImVec2 canvas_pos) {
+    const auto& lib = GetComponentLibrary();
+    for (auto& inst : g_comp_instances) {
+        const ComponentDef* def = GetInstDef(inst);
+        if (!def) continue;
+        ImVec2 screenC = CanvasToScreen(ImVec2(inst.x, inst.y), canvas_pos);
+        def->drawSymbol(dl, screenC, g_canvas_zoom, inst.selected, g_is_running, inst.nodeTemps);
+        DrawPorts(dl, *def, screenC, g_canvas_zoom, inst.selected,
+                  (g_hovered_port_inst == inst.instId) ? g_hovered_port_id : "");
+    }
+}
+
+// Draw component connections
+static void DrawComponentConnections(ImDrawList* dl, ImVec2 canvas_pos) {
+    for (const auto& conn : g_comp_connections) {
+        CompInstance* fromInst = nullptr;
+        CompInstance* toInst   = nullptr;
+        for (auto& inst : g_comp_instances) {
+            if (inst.instId == conn.fromInstId) fromInst = &inst;
+            if (inst.instId == conn.toInstId)   toInst   = &inst;
+        }
+        if (!fromInst || !toInst) continue;
+        const ComponentDef* fd = GetInstDef(*fromInst);
+        const ComponentDef* td = GetInstDef(*toInst);
+        if (!fd || !td) continue;
+
+        ImVec2 pA = GetPortWorldPos(*fromInst, *fd, conn.fromPortId, canvas_pos, g_canvas_zoom, g_canvas_scrolling);
+        ImVec2 pB = GetPortWorldPos(*toInst,   *td, conn.toPortId,   canvas_pos, g_canvas_zoom, g_canvas_scrolling);
+
+        ImU32 lineCol = PortTypeColor(conn.portType);
+        bool sel = (g_sel_conn == &conn);
+        // Orthogonal routing
+        float mx = 0.5f*(pA.x + pB.x);
+        dl->AddLine(pA, ImVec2(mx, pA.y), lineCol, sel ? 3.0f : 2.0f);
+        dl->AddLine(ImVec2(mx, pA.y), ImVec2(mx, pB.y), lineCol, sel ? 3.0f : 2.0f);
+        dl->AddLine(ImVec2(mx, pB.y), pB, lineCol, sel ? 3.0f : 2.0f);
+
+        // Flow chevron
+        if (g_is_running) {
+            static float connPhase = 0.0f;
+            connPhase += 0.015f;
+            float t = fmodf(connPhase, 1.0f);
+            ImVec2 pt(
+                pA.x + (pB.x - pA.x) * t,
+                pA.y + (pB.y - pA.y) * t
+            );
+            float sz = 5.0f;
+            dl->AddCircleFilled(pt, sz, lineCol);
+        }
+    }
+}
+
 // Canvas coordinate helper functions
 ImVec2 CanvasToScreen(ImVec2 local_pos, ImVec2 canvas_origin) {
     return ImVec2(
@@ -239,7 +364,7 @@ inline double cToK(double c) { return c + K_ZERO; }
 inline double kToC(double k) { return k - K_ZERO; }
 
 // Logging helper
-void Log(const std::string& message, const std::string& type = "info") {
+void Log(const std::string& message, const std::string& type) {
     auto now = std::chrono::system_clock::now();
     auto in_time_t = std::chrono::system_clock::to_time_t(now);
     std::stringstream ss;
@@ -1225,57 +1350,152 @@ void RenderUI() {
     // --- PANEL 2: COMPONENT LIBRARY & TREE EXPLORER (Left) ---
     ImGui::Begin("Object Explorer", nullptr);
     {
-        if (ImGui::CollapsingHeader("Object Library Templates", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Columns(2, "lib_cols", false);
-            
-            // Standard CAD Thermal Mass node button
-            ImGui::Button("[Node] Mass\n(Node)", ImVec2(90.0f, 40.0f));
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Double click on empty canvas to place a Thermal Mass node.");
-            
-            ImGui::NextColumn();
-            ImGui::Button("[Fixed] Boundary\n(Fixed T)", ImVec2(90.0f, 40.0f));
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Double click to create, then toggle 'Fixed Temperature' in Attribute sheet.");
-            
-            ImGui::NextColumn();
-            ImGui::Button("Conduction\n(Link)", ImVec2(90.0f, 30.0f));
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Select 'Connect Link' tool, drag from start node to end node.");
-            
-            ImGui::NextColumn();
-            ImGui::Button("Convection\n(Link)", ImVec2(90.0f, 30.0f));
-            
-            ImGui::NextColumn();
-            ImGui::Button("Radiation\n(Link)", ImVec2(90.0f, 30.0f));
-            
-            ImGui::NextColumn();
-            ImGui::Button("Flow Loop\n(Advection)", ImVec2(90.0f, 30.0f));
-            
-            ImGui::Columns(1);
+        // ── MODE TOGGLE ───────────────────────────────────────────────────────
+        ImGui::PushStyleColor(ImGuiCol_Text, g_comp_mode
+            ? ImVec4(0.3f,1.0f,0.5f,1.0f)
+            : ImVec4(0.7f,0.7f,0.7f,1.0f));
+        if (ImGui::Button(g_comp_mode ? "MODE: COMPONENT LIB" : "MODE: GENERIC NODES", ImVec2(-1, 0))) {
+            g_comp_mode = !g_comp_mode;
+            if (g_comp_mode)
+                Log("Switched to Physical Component Library mode.", "success");
+            else
+                Log("Switched to Generic Node/Link mode.", "info");
         }
-        
+        ImGui::PopStyleColor();
         ImGui::Separator();
-        
-        if (ImGui::CollapsingHeader("Model Directory Tree", ImGuiTreeNodeFlags_DefaultOpen)) {
-            if (ImGui::TreeNode("Active Nodes")) {
-                for (auto& n : g_nodes) {
-                    bool selected = (g_selected_node == &n);
-                    if (ImGui::Selectable((std::string("[Node] ") + n.name).c_str(), selected)) {
-                        g_selected_node = &n;
-                        g_selected_link = nullptr;
-                    }
+
+        if (g_comp_mode) {
+            // ── ICE COMPONENT LIBRARY ─────────────────────────────────────────
+            ImGui::TextColored(ImVec4(0.9f,0.7f,0.2f,1.0f), "ICE Cooling Components");
+            ImGui::TextDisabled("Click to arm, then click on canvas to place");
+            ImGui::Spacing();
+
+            const auto& lib = GetComponentLibrary();
+            for (const auto& def : lib) {
+                if (def.category != "ICE" && def.category != "Common") continue;
+                bool armed = (g_pending_comp_type == def.id && g_placing_component);
+
+                // Colour-code button by category
+                ImVec4 btnCol  = armed ? ImVec4(0.2f,0.8f,0.4f,1.0f) : ImVec4(0.18f,0.22f,0.32f,1.0f);
+                ImVec4 portCol;
+                // Pick accent from border colour
+                ImU32 bc = def.borderColor;
+                portCol = ImVec4(((bc>>0)&0xFF)/255.0f,((bc>>8)&0xFF)/255.0f,((bc>>16)&0xFF)/255.0f,1.0f);
+
+                ImGui::PushStyleColor(ImGuiCol_Button, btnCol);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f,0.35f,0.5f,1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, portCol);
+
+                std::string btnLabel = def.name;
+                if (ImGui::Button(btnLabel.c_str(), ImVec2(-1.0f, 32.0f))) {
+                    g_pending_comp_type = def.id;
+                    g_placing_component = true;
+                    g_current_tool = 2;   // 2 = Place Component tool
+                    Log("Armed: " + def.name + " — click on canvas to place.", "info");
                 }
-                ImGui::TreePop();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", def.description.c_str());
+
+                // Port legend inline
+                ImGui::SameLine(ImGui::GetContentRegionAvail().x - 80.0f);
+                for (const auto& p : def.ports) {
+                    ImVec4 pc;
+                    ImU32 cc = PortTypeColor(p.type);
+                    pc = ImVec4(((cc>>0)&0xFF)/255.0f,((cc>>8)&0xFF)/255.0f,((cc>>16)&0xFF)/255.0f,1.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Text, pc);
+                    ImGui::Text("o");
+                    ImGui::PopStyleColor();
+                    ImGui::SameLine();
+                }
+                ImGui::NewLine();
+
+                ImGui::PopStyleColor(3);
+                ImGui::Spacing();
             }
-            if (ImGui::TreeNode("Active Connections")) {
-                for (auto& l : g_links) {
-                    bool selected = (g_selected_link == &l);
-                    std::string typeStr = (l.type == 0 ? "Cond" : (l.type == 1 ? "Conv" : (l.type == 2 ? "Rad" : "Flow")));
-                    std::string label = "[" + typeStr + "] (" + std::to_string(l.node_a) + " -> " + std::to_string(l.node_b) + ")";
-                    if (ImGui::Selectable(label.c_str(), selected)) {
-                        g_selected_link = &l;
+
+            ImGui::Separator();
+            if (ImGui::Button("Connect Ports", ImVec2(-1,0))) {
+                g_current_tool = 3;
+                g_conn_from_inst = -1;
+                g_conn_from_port = "";
+                Log("Connect Ports tool active — click a port, then click target port.", "info");
+            }
+
+            ImGui::Separator();
+            // ── PLACED COMPONENTS TREE ────────────────────────────────────────
+            if (ImGui::CollapsingHeader("Placed Components", ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (auto& inst : g_comp_instances) {
+                    const ComponentDef* def2 = GetInstDef(inst);
+                    std::string lbl = (def2 ? def2->name : inst.defId) + " [" + std::to_string(inst.instId) + "]";
+                    bool sel = (g_sel_comp == &inst);
+                    if (ImGui::Selectable(lbl.c_str(), sel)) {
+                        g_sel_comp  = &inst;
+                        g_sel_conn  = nullptr;
                         g_selected_node = nullptr;
+                        g_selected_link = nullptr;
+                        // mark selected
+                        for (auto& i2 : g_comp_instances) i2.selected = false;
+                        inst.selected = true;
                     }
                 }
-                ImGui::TreePop();
+            }
+            if (ImGui::CollapsingHeader("Connections")) {
+                int ci = 0;
+                for (auto& conn : g_comp_connections) {
+                    std::string lbl = std::to_string(conn.fromInstId) + "." + conn.fromPortId
+                                    + " -> " + std::to_string(conn.toInstId) + "." + conn.toPortId;
+                    bool sel = (g_sel_conn == &conn);
+                    if (ImGui::Selectable(lbl.c_str(), sel)) {
+                        g_sel_conn  = &conn;
+                        g_sel_comp  = nullptr;
+                    }
+                    ++ci;
+                }
+            }
+
+        } else {
+            // ── LEGACY GENERIC MODE ───────────────────────────────────────────
+            if (ImGui::CollapsingHeader("Object Library Templates", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Columns(2, "lib_cols", false);
+                ImGui::Button("[Node] Mass\n(Node)", ImVec2(90.0f, 40.0f));
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Double click on empty canvas to place a Thermal Mass node.");
+                ImGui::NextColumn();
+                ImGui::Button("[Fixed] Boundary\n(Fixed T)", ImVec2(90.0f, 40.0f));
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Double click to create, then toggle 'Fixed Temperature' in Attribute sheet.");
+                ImGui::NextColumn();
+                ImGui::Button("Conduction\n(Link)", ImVec2(90.0f, 30.0f));
+                ImGui::NextColumn();
+                ImGui::Button("Convection\n(Link)", ImVec2(90.0f, 30.0f));
+                ImGui::NextColumn();
+                ImGui::Button("Radiation\n(Link)", ImVec2(90.0f, 30.0f));
+                ImGui::NextColumn();
+                ImGui::Button("Flow Loop\n(Advection)", ImVec2(90.0f, 30.0f));
+                ImGui::Columns(1);
+            }
+            ImGui::Separator();
+            if (ImGui::CollapsingHeader("Model Directory Tree", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::TreeNode("Active Nodes")) {
+                    for (auto& n : g_nodes) {
+                        bool selected = (g_selected_node == &n);
+                        if (ImGui::Selectable((std::string("[Node] ") + n.name).c_str(), selected)) {
+                            g_selected_node = &n;
+                            g_selected_link = nullptr;
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+                if (ImGui::TreeNode("Active Connections")) {
+                    for (auto& l : g_links) {
+                        bool selected = (g_selected_link == &l);
+                        std::string typeStr = (l.type == 0 ? "Cond" : (l.type == 1 ? "Conv" : (l.type == 2 ? "Rad" : "Flow")));
+                        std::string label = "[" + typeStr + "] (" + std::to_string(l.node_a) + " -> " + std::to_string(l.node_b) + ")";
+                        if (ImGui::Selectable(label.c_str(), selected)) {
+                            g_selected_link = &l;
+                            g_selected_node = nullptr;
+                        }
+                    }
+                    ImGui::TreePop();
+                }
             }
         }
     }
@@ -1285,11 +1505,22 @@ void RenderUI() {
     ImGui::Begin("Schematic Diagram Canvas", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     {
         // Canvas Toolbar
-        if (ImGui::RadioButton("Select Tool", g_current_tool == 0)) { setTool(0); }
+        if (ImGui::RadioButton("Select", g_current_tool == 0)) { setTool(0); g_placing_component=false; g_pending_comp_type=""; }
         ImGui::SameLine();
-        if (ImGui::RadioButton("Connect Link", g_current_tool == 1)) { setTool(1); }
-        ImGui::SameLine();
-        ImGui::TextDisabled(" | Zoom: %.0f%% (Use Mouse Wheel, Drag Right/Middle mouse to Pan)", g_canvas_zoom * 100.0f);
+        if (!g_comp_mode) {
+            if (ImGui::RadioButton("Connect Link", g_current_tool == 1)) { setTool(1); }
+            ImGui::SameLine();
+        } else {
+            if (ImGui::RadioButton("Connect Ports", g_current_tool == 3)) { g_current_tool=3; g_conn_from_inst=-1; g_conn_from_port=""; }
+            ImGui::SameLine();
+            if (g_placing_component) {
+                ImGui::TextColored(ImVec4(0.2f,1.0f,0.4f,1.0f), "[PLACING: %s] — Click canvas to drop | ESC to cancel",
+                    g_pending_comp_type.c_str());
+            }
+            ImGui::SameLine();
+        }
+        ImGui::TextDisabled(" | Zoom: %.0f%%  |  %s mode", g_canvas_zoom * 100.0f,
+            g_comp_mode ? "Component Library" : "Generic Nodes");
         
         ImGui::Separator();
         
@@ -1530,63 +1761,246 @@ void RenderUI() {
                 draw_list->AddLine(pStart, pEnd, IM_COL32(2, 92, 162, 180), 1.5f * g_canvas_zoom);
             }
         }
-        
-        // --- CANVAS INTERACTIONS (CLICKS, DRAGS, NEW NODES) ---
-        if (is_hovered) {
-            // Mouse Pressed (Select or Drag or start linking)
-            if (ImGui::IsMouseClicked(0)) {
-                auto hit_node = getNodeAt(local_mouse);
-                if (g_current_tool == 0) { // Select tool
-                    if (hit_node) {
-                        g_selected_node = hit_node;
-                        g_selected_link = nullptr;
-                        isDragging = true;
-                        dragNode = hit_node;
-                        dragOffset.x = local_mouse.x - hit_node->x;
-                        dragOffset.y = local_mouse.y - hit_node->y;
-                        
-                        // Save backup for Undo if dragged
-                        g_drag_backup.nodes = g_nodes;
-                        g_drag_backup.links = g_links;
-                        g_drag_backup_valid = true;
-                    } else {
-                        auto hit_link = getLinkAt(local_mouse);
-                        if (hit_link) {
-                            g_selected_link = hit_link;
-                            g_selected_node = nullptr;
-                        } else {
-                            g_selected_node = nullptr;
-                            g_selected_link = nullptr;
+
+        // ─── COMPONENT LIBRARY LAYER ────────────────────────────────────────────────
+        if (g_comp_mode) {
+            // Draw wired connections first (behind components)
+            DrawComponentConnections(draw_list, canvas_pos);
+
+            // Draw placed components
+            DrawComponentInstances(draw_list, canvas_pos);
+
+            // Ghost preview when placing a component
+            if (g_placing_component && !g_pending_comp_type.empty() && is_hovered) {
+                const ComponentDef* def = GetCompDefById(g_pending_comp_type);
+                if (def) {
+                    ImVec2 ghostC = CanvasToScreen(local_mouse, canvas_pos);
+                    // Draw semi-transparent ghost
+                    draw_list->AddCircle(ghostC, 30.0f * g_canvas_zoom, IM_COL32(80, 200, 100, 180), 32, 2.0f);
+                    draw_list->AddText(ImVec2(ghostC.x + 12, ghostC.y - 8),
+                        IM_COL32(100, 255, 130, 220), def->name.c_str());
+                }
+            }
+
+            // Port hover detection (tool 3 = Connect Ports)
+            if (g_current_tool == 3) {
+                g_hovered_port_inst = -1;
+                g_hovered_port_id   = "";
+                float hitR = 12.0f; // screen px
+                for (const auto& inst : g_comp_instances) {
+                    const ComponentDef* def = GetInstDef(inst);
+                    if (!def) continue;
+                    for (const auto& p : def->ports) {
+                        ImVec2 wp = GetPortWorldPos(inst, *def, p.id, canvas_pos, g_canvas_zoom, g_canvas_scrolling);
+                        if (std::hypot(wp.x - mouse_pos.x, wp.y - mouse_pos.y) < hitR) {
+                            g_hovered_port_inst = inst.instId;
+                            g_hovered_port_id   = p.id;
+                            ImGui::SetTooltip("%s [%s]", p.label.c_str(), PortTypeName(p.type));
+                            break;
                         }
                     }
-                } else if (g_current_tool == 1) { // Connect link tool
-                    if (hit_node) {
-                        g_linking_start_node = hit_node;
+                    if (g_hovered_port_inst >= 0) break;
+                }
+            }
+
+            // Draw in-progress connection rubber-band (tool 3)
+            if (g_current_tool == 3 && g_conn_from_inst >= 0) {
+                CompInstance* fInst = nullptr;
+                for (auto& inst : g_comp_instances) if (inst.instId == g_conn_from_inst) { fInst = &inst; break; }
+                if (fInst) {
+                    const ComponentDef* fd = GetInstDef(*fInst);
+                    if (fd) {
+                        ImVec2 pA = GetPortWorldPos(*fInst, *fd, g_conn_from_port, canvas_pos, g_canvas_zoom, g_canvas_scrolling);
+                        ImU32 rubberCol = IM_COL32(80, 200, 120, 200);
+                        // Find hovered port for snap
+                        ImVec2 target = mouse_pos;
+                        if (g_hovered_port_inst >= 0 && g_hovered_port_inst != g_conn_from_inst) {
+                            CompInstance* hInst = nullptr;
+                            for (auto& inst : g_comp_instances) if (inst.instId == g_hovered_port_inst) { hInst = &inst; break; }
+                            if (hInst) {
+                                const ComponentDef* hd = GetInstDef(*hInst);
+                                if (hd) target = GetPortWorldPos(*hInst, *hd, g_hovered_port_id, canvas_pos, g_canvas_zoom, g_canvas_scrolling);
+                            }
+                        }
+                        float mx = 0.5f*(pA.x + target.x);
+                        draw_list->AddLine(pA, ImVec2(mx, pA.y), rubberCol, 2.0f);
+                        draw_list->AddLine(ImVec2(mx, pA.y), ImVec2(mx, target.y), rubberCol, 2.0f);
+                        draw_list->AddLine(ImVec2(mx, target.y), target, rubberCol, 2.0f);
                     }
                 }
             }
-            
-            // Mouse Dragging (for moving nodes)
-            if (isDragging && dragNode && ImGui::IsMouseDragging(0)) {
+        } // end if g_comp_mode
+        
+        // --- CANVAS INTERACTIONS (CLICKS, DRAGS, NEW NODES) ---
+        if (is_hovered) {
+
+            // ESC cancels place mode
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                g_placing_component = false;
+                g_pending_comp_type = "";
+                g_conn_from_inst = -1;
+                g_conn_from_port = "";
+                if (g_current_tool == 2 || g_current_tool == 3)
+                    g_current_tool = 0;
+            }
+
+            // Mouse Pressed (Select or Drag or start linking)
+            if (ImGui::IsMouseClicked(0)) {
+
+                // ── Tool 2: Place Component ──────────────────────────────────
+                if (g_comp_mode && g_current_tool == 2 && g_placing_component) {
+                    float cx = local_mouse.x, cy = local_mouse.y;
+                    if (g_grid_snap) {
+                        cx = std::round(cx / GRID_SIZE) * GRID_SIZE;
+                        cy = std::round(cy / GRID_SIZE) * GRID_SIZE;
+                    }
+                    PlaceComponent(g_pending_comp_type, cx, cy);
+                    // Stay in placing mode so user can place multiple instances
+                    // Shift+click keeps placing; plain click places once then returns to Select
+                    if (!io.KeyShift) {
+                        g_placing_component = false;
+                        g_pending_comp_type = "";
+                        g_current_tool = 0;
+                    }
+                }
+                // ── Tool 3: Connect Ports ──────────────────────────────────
+                else if (g_comp_mode && g_current_tool == 3) {
+                    if (g_hovered_port_inst >= 0) {
+                        if (g_conn_from_inst < 0) {
+                            // Start of connection
+                            g_conn_from_inst = g_hovered_port_inst;
+                            g_conn_from_port = g_hovered_port_id;
+                            Log("Port selected: " + g_conn_from_port + " on inst " + std::to_string(g_conn_from_inst), "info");
+                        } else if (g_hovered_port_inst != g_conn_from_inst) {
+                            // End of connection — type check
+                            CompInstance* fInst = nullptr, *tInst = nullptr;
+                            for (auto& inst : g_comp_instances) {
+                                if (inst.instId == g_conn_from_inst) fInst = &inst;
+                                if (inst.instId == g_hovered_port_inst) tInst = &inst;
+                            }
+                            if (fInst && tInst) {
+                                const ComponentDef* fd = GetInstDef(*fInst);
+                                const ComponentDef* td = GetInstDef(*tInst);
+                                if (fd && td) {
+                                    // Get port type of each
+                                    PortType fromType = PortType::Any, toType = PortType::Any;
+                                    for (const auto& p : fd->ports) if (p.id == g_conn_from_port) { fromType = p.type; break; }
+                                    for (const auto& p : td->ports) if (p.id == g_hovered_port_id) { toType = p.type; break; }
+
+                                    if (PortTypesCompatible(fromType, toType)) {
+                                        PushUndoState();
+                                        CompConnection conn;
+                                        conn.connId     = g_next_conn_id++;
+                                        conn.fromInstId = g_conn_from_inst;
+                                        conn.fromPortId = g_conn_from_port;
+                                        conn.toInstId   = g_hovered_port_inst;
+                                        conn.toPortId   = g_hovered_port_id;
+                                        conn.portType   = fromType;
+                                        conn.flow_rate  = 20.0;
+                                        g_comp_connections.push_back(conn);
+                                        SyncComponentsWithSolver();
+                                        Log("Connected: " + g_conn_from_port + " -> " + g_hovered_port_id, "success");
+                                    } else {
+                                        Log("Port type mismatch: " + std::string(PortTypeName(fromType))
+                                            + " cannot connect to " + std::string(PortTypeName(toType)), "error");
+                                    }
+                                }
+                            }
+                            g_conn_from_inst = -1;
+                            g_conn_from_port = "";
+                        }
+                    } else {
+                        // Clicked empty space — cancel pending connection
+                        g_conn_from_inst = -1;
+                        g_conn_from_port = "";
+                    }
+                }
+                // ── Tool 0: Select (also handles component selection) ─────────
+                else {
+                    auto hit_node = getNodeAt(local_mouse);
+                    if (g_comp_mode) {
+                        // Check if a component was clicked
+                        CompInstance* hitComp = nullptr;
+                        for (auto& inst : g_comp_instances) {
+                            const ComponentDef* def = GetInstDef(inst);
+                            if (!def) continue;
+                            float hw = def->width * 0.5f + 8.0f;
+                            float hh = def->height * 0.5f + 8.0f;
+                            if (local_mouse.x >= inst.x - hw && local_mouse.x <= inst.x + hw &&
+                                local_mouse.y >= inst.y - hh && local_mouse.y <= inst.y + hh) {
+                                hitComp = &inst; break;
+                            }
+                        }
+                        if (hitComp) {
+                            g_sel_comp = hitComp;
+                            g_sel_conn = nullptr;
+                            g_selected_node = nullptr;
+                            g_selected_link = nullptr;
+                            for (auto& i2 : g_comp_instances) i2.selected = false;
+                            hitComp->selected = true;
+                            isDragging = true;
+                            dragOffset.x = local_mouse.x - hitComp->x;
+                            dragOffset.y = local_mouse.y - hitComp->y;
+                        } else {
+                            g_sel_comp = nullptr;
+                            for (auto& i2 : g_comp_instances) i2.selected = false;
+                        }
+                    } else {
+                        if (g_current_tool == 0) { // Select tool
+                            if (hit_node) {
+                                g_selected_node = hit_node;
+                                g_selected_link = nullptr;
+                                isDragging = true;
+                                dragNode = hit_node;
+                                dragOffset.x = local_mouse.x - hit_node->x;
+                                dragOffset.y = local_mouse.y - hit_node->y;
+                                g_drag_backup.nodes = g_nodes;
+                                g_drag_backup.links = g_links;
+                                g_drag_backup_valid = true;
+                            } else {
+                                auto hit_link = getLinkAt(local_mouse);
+                                if (hit_link) {
+                                    g_selected_link = hit_link;
+                                    g_selected_node = nullptr;
+                                } else {
+                                    g_selected_node = nullptr;
+                                    g_selected_link = nullptr;
+                                }
+                            }
+                        } else if (g_current_tool == 1) { // Connect link tool
+                            if (hit_node) {
+                                g_linking_start_node = hit_node;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Mouse Dragging
+            if (isDragging && ImGui::IsMouseDragging(0)) {
                 float targetX = local_mouse.x - dragOffset.x;
                 float targetY = local_mouse.y - dragOffset.y;
                 if (g_grid_snap) {
                     targetX = std::round(targetX / GRID_SIZE) * GRID_SIZE;
                     targetY = std::round(targetY / GRID_SIZE) * GRID_SIZE;
                 }
-                dragNode->x = targetX;
-                dragNode->y = targetY;
+                if (g_comp_mode && g_sel_comp) {
+                    g_sel_comp->x = targetX;
+                    g_sel_comp->y = targetY;
+                } else if (dragNode) {
+                    dragNode->x = targetX;
+                    dragNode->y = targetY;
+                }
             }
-            
-            // Mouse Released (end drag or complete linking)
+
+            // Mouse Released
             if (ImGui::IsMouseReleased(0)) {
-                if (isDragging && dragNode) {
+                if (isDragging) {
                     isDragging = false;
-                    if (g_drag_backup_valid) {
+                    if (!g_comp_mode && dragNode && g_drag_backup_valid) {
                         auto it = std::find_if(g_drag_backup.nodes.begin(), g_drag_backup.nodes.end(), [&](const DesktopNode& n) { return n.id == dragNode->id; });
                         if (it != g_drag_backup.nodes.end()) {
                             if (it->x != dragNode->x || it->y != dragNode->y) {
-                                // Pushing backup of state before move onto undo stack
                                 g_undo_stack.push_back(g_drag_backup);
                                 if (g_undo_stack.size() > 50) g_undo_stack.erase(g_undo_stack.begin());
                                 g_redo_stack.clear();
@@ -1597,10 +2011,9 @@ void RenderUI() {
                     dragNode = nullptr;
                     g_drag_backup_valid = false;
                 }
-                if (g_linking_start_node && g_current_tool == 1) {
+                if (!g_comp_mode && g_linking_start_node && g_current_tool == 1) {
                     auto hit_end = getNodeAt(local_mouse);
                     if (hit_end && hit_end->id != g_linking_start_node->id) {
-                        // Open Link popup configurations
                         g_show_link_modal = true;
                         g_modal_node_a_id = g_linking_start_node->id;
                         g_modal_node_b_id = hit_end->id;
@@ -1611,9 +2024,9 @@ void RenderUI() {
                     g_linking_start_node = nullptr;
                 }
             }
-            
-            // Double Click to add new node
-            if (ImGui::IsMouseDoubleClicked(0)) {
+
+            // Double Click to add new node (legacy mode only)
+            if (!g_comp_mode && ImGui::IsMouseDoubleClicked(0)) {
                 auto hit_node = getNodeAt(local_mouse);
                 if (!hit_node) {
                     float x = local_mouse.x;
@@ -1623,11 +2036,9 @@ void RenderUI() {
                         y = std::round(y / GRID_SIZE) * GRID_SIZE;
                     }
                     int nextId = g_nodes.empty() ? 1 : std::max_element(g_nodes.begin(), g_nodes.end(), [](const DesktopNode& a, const DesktopNode& b){ return a.id < b.id; })->id + 1;
-                    
-                    PushUndoState(); // Save state before placing new node
+                    PushUndoState();
                     DesktopNode newNode = { nextId, "Mass " + std::to_string(nextId), x, y, 25.0, 500.0, 0.0, false };
                     g_nodes.push_back(newNode);
-                    
                     g_plot_active_nodes[nextId] = true;
                     SyncSystemWithSolver();
                     ResetHistory();
@@ -1644,11 +2055,80 @@ void RenderUI() {
     ImGui::Begin("Inspector Panel", nullptr);
     {
         if (ImGui::BeginTabBar("InspectorTabBar")) {
-            
+
             // Tab 1: Properties Spreadsheet (Attribute Sheet)
             if (ImGui::BeginTabItem("Attribute Sheet")) {
                 ImGui::BeginChild("SS_ChildRegion");
-                
+
+                // ── COMPONENT LIBRARY ATTRIBUTE SHEET ───────────────────────────
+                if (g_comp_mode && g_sel_comp != nullptr) {
+                    const ComponentDef* def = GetInstDef(*g_sel_comp);
+                    if (def) {
+                        ImGui::TextColored(ImVec4(0.9f,0.7f,0.2f,1.0f), "%s  [ID: %d]",
+                            def->name.c_str(), g_sel_comp->instId);
+                        ImGui::TextDisabled("%s", def->description.c_str());
+                        ImGui::Separator();
+
+                        // Port legend
+                        ImGui::TextDisabled("Ports:");
+                        for (const auto& p : def->ports) {
+                            ImU32 pc = PortTypeColor(p.type);
+                            ImGui::TextColored(
+                                ImVec4(((pc>>0)&0xFF)/255.f,((pc>>8)&0xFF)/255.f,((pc>>16)&0xFF)/255.f,1.f),
+                                "  [%s] %s (%s)",
+                                p.isOutput ? "OUT" : "IN", p.label.c_str(), PortTypeName(p.type));
+                        }
+                        ImGui::Separator();
+
+                        // Parameter table
+                        if (ImGui::BeginTable("comp_param_table", 4,
+                            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+                            ImGui::TableSetupColumn("Parameter",   ImGuiTableColumnFlags_WidthFixed, 120.f);
+                            ImGui::TableSetupColumn("Value",       ImGuiTableColumnFlags_WidthFixed, 80.f);
+                            ImGui::TableSetupColumn("Unit",        ImGuiTableColumnFlags_WidthFixed, 36.f);
+                            ImGui::TableSetupColumn("Description", ImGuiTableColumnFlags_WidthStretch);
+                            ImGui::TableHeadersRow();
+
+                            for (const auto& pd : def->params) {
+                                auto it = g_sel_comp->params.find(pd.key);
+                                double val = (it != g_sel_comp->params.end()) ? it->second : pd.defaultValue;
+
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn(); ImGui::Text("%s", pd.label.c_str());
+                                ImGui::TableNextColumn();
+                                float fval = (float)val;
+                                ImGui::SetNextItemWidth(-1);
+                                std::string sliderLabel = "##comp_" + pd.key;
+                                if (ImGui::SliderFloat(sliderLabel.c_str(), &fval,
+                                    (float)pd.minVal, (float)pd.maxVal, "%.3g")) {
+                                    g_sel_comp->params[pd.key] = fval;
+                                    SyncComponentsWithSolver();
+                                }
+                                ImGui::TableNextColumn(); ImGui::TextDisabled("%s", pd.unit.c_str());
+                                ImGui::TableNextColumn(); ImGui::TextDisabled("%s", pd.description.c_str());
+                            }
+                            ImGui::EndTable();
+                        }
+
+                        ImGui::Spacing();
+                        // Delete component button
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f,0.1f,0.1f,1.0f));
+                        if (ImGui::Button("Delete Component", ImVec2(-1,0))) {
+                            PushUndoState();
+                            int delId = g_sel_comp->instId;
+                            g_comp_instances.erase(std::remove_if(g_comp_instances.begin(), g_comp_instances.end(),
+                                [delId](const CompInstance& i){ return i.instId == delId; }), g_comp_instances.end());
+                            g_comp_connections.erase(std::remove_if(g_comp_connections.begin(), g_comp_connections.end(),
+                                [delId](const CompConnection& c){ return c.fromInstId==delId || c.toInstId==delId; }), g_comp_connections.end());
+                            g_sel_comp = nullptr;
+                            SyncComponentsWithSolver();
+                            Log("Deleted component instance " + std::to_string(delId), "warning");
+                        }
+                        ImGui::PopStyleColor();
+                    }
+                }
+                // ── LEGACY NODE/LINK ATTRIBUTE SHEET ───────────────────────────
+                else if (!g_comp_mode || g_sel_comp == nullptr) {
                 if (g_selected_node == nullptr && g_selected_link == nullptr) {
                     ImGui::TextDisabled("No component selected.");
                     ImGui::TextDisabled("Select an element on canvas to edit attributes.");
@@ -2186,7 +2666,8 @@ void RenderUI() {
                         deleteSelected();
                     }
                 }
-                
+                } // end else if legacy mode
+
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }

@@ -68,6 +68,7 @@ def compile_desktop():
     sources = [
         os.path.join("src", "core", "solver.cpp"),
         os.path.join("src", "desktop", "main.cpp"),
+        os.path.join("src", "desktop", "component_library.cpp"),
         os.path.join("thirdparty", "imgui", "imgui.cpp"),
         os.path.join("thirdparty", "imgui", "imgui_draw.cpp"),
         os.path.join("thirdparty", "imgui", "imgui_widgets.cpp"),
