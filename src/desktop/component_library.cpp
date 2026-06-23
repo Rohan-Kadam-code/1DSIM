@@ -440,10 +440,11 @@ static void InitLibrary() {
             { "heat_out",    1 }, { "oil_in",     1 }
         };
         d.params = {
-            { "heat_rejection",    "Heat Rejection",    "W",    "Engine heat rejected to coolant at rated load", 15000.0, 0,     80000, 500  },
-            { "block_capacity",    "Block Thermal Mass","J/K",  "Engine block thermal capacity",                 55000.0, 5000,  200000,1000 },
-            { "block_jacket_cond", "Block-Jacket cond", "W/K",  "Conductance from block to coolant jacket",       1200.0, 100,   5000,  50   },
-            { "jacket_volume",     "Jacket Volume",     "L",    "Coolant jacket fluid volume",                       4.5, 0.5,   15.0,  0.5  }
+            { "heat_rejection",    "Heat Rejection",    "W",    "Engine heat rejected to coolant at rated load", 15000.0, 0.0,   80000.0, 500.0 },
+            { "block_capacity",    "Block Thermal Mass","J/K",  "Engine block thermal capacity",                 55000.0, 5000.0, 200000.0,1000.0 },
+            { "block_jacket_cond", "Block-Jacket cond", "W/K",  "Conductance from block to coolant jacket",       1200.0, 100.0,  5000.0,  50.0  },
+            { "jacket_volume",     "Jacket Volume",     "L",    "Coolant jacket fluid volume",                       4.5, 0.5,    15.0,    0.5   },
+            { "flow_resistance",   "Flow Resistance",   "Pa/(L/min)^2", "Engine jacket flow resistance coefficient", 0.1, 0.0, 10.0, 0.01 }
         };
         d.drawSymbol = DrawEngine;
         s_library.push_back(d);
@@ -480,10 +481,11 @@ static void InitLibrary() {
             { "air_in",      2 }, { "air_out",     2 }
         };
         d.params = {
-            { "coolant_hA",    "Coolant-Core hA", "W/K", "Coolant-to-core heat transfer coefficient x area", 800.0,  50, 5000, 50 },
-            { "air_hA",        "Core-Air hA",     "W/K", "Core-to-air heat transfer coefficient x area",     500.0,  50, 5000, 50 },
-            { "coolant_volume","Coolant Volume",  "L",   "Coolant volume inside radiator",                     3.0, 0.1, 20.0, 0.5 },
-            { "core_capacity", "Core Mass",       "J/K", "Radiator core thermal capacity",                  8000.0, 500,50000,500 }
+            { "coolant_hA",      "Coolant-Core hA", "W/K", "Coolant-to-core heat transfer coefficient x area", 800.0,  50.0, 5000.0, 50.0 },
+            { "air_hA",          "Core-Air hA",     "W/K", "Core-to-air heat transfer coefficient x area",     500.0,  50.0, 5000.0, 50.0 },
+            { "coolant_volume",  "Coolant Volume",  "L",   "Coolant volume inside radiator",                     3.0, 0.1, 20.0, 0.5 },
+            { "core_capacity",   "Core Mass",       "J/K", "Radiator core thermal capacity",                  8000.0, 500.0,50000.0,500.0 },
+            { "flow_resistance", "Flow Resistance", "Pa/(L/min)^2", "Radiator flow resistance coefficient K",     0.05, 0.0, 10.0, 0.01 }
         };
         d.drawSymbol = DrawRadiator;
         s_library.push_back(d);
@@ -541,7 +543,10 @@ static void InitLibrary() {
         d.links = {};
         d.portNodeMap = {};
         d.params = {
-            { "flow_rate", "Flow Rate", "L/min", "Volumetric flow rate of coolant", 20.0, 0.1, 200.0, 1.0 }
+            { "speed",     "Pump Speed",   "fraction", "Pump speed fraction (0.0 - 1.0)",          1.0, 0.0, 1.0, 0.05 },
+            { "p_max",     "Max Pressure", "Pa",       "Design max pressure rise at zero flow", 100000.0, 1000.0, 1000000.0, 5000.0 },
+            { "q_max",     "Max Flow Rate", "L/min",    "Design max flow rate at zero pressure",   50.0, 1.0, 500.0, 2.0 },
+            { "flow_rate", "Flow Rate",    "L/min",    "Calculated flow rate (read-only output)",  0.0, 0.0, 500.0, 0.0 }
         };
         d.drawSymbol = DrawPump;
         s_library.push_back(d);
@@ -574,10 +579,9 @@ static void InitLibrary() {
             { "inlet", 1 }, { "main_out", 1 }, { "bypass_out", 1 }
         };
         d.params = {
-            { "open_temp",   "Opening Temp",    "°C", "Temperature at which thermostat starts to open",   82.0,  50, 110, 1.0 },
-            { "full_open",   "Fully Open Temp", "°C", "Temperature at which thermostat is fully open",    95.0,  60, 120, 1.0 },
-            { "main_flow",   "Main Flow Rate",  "L/min", "Full-open main circuit flow rate",              20.0,  1,  100, 1.0 },
-            { "bypass_flow", "Bypass Flow Rate","L/min", "Full-bypass flow rate (thermostat closed)",      5.0,  0,   50, 1.0 }
+            { "open_temp",       "Opening Temp",    "°C", "Temperature at which thermostat starts to open",   82.0,  50.0, 110.0, 1.0 },
+            { "full_open",       "Fully Open Temp", "°C", "Temperature at which thermostat is fully open",    95.0,  60.0, 120.0, 1.0 },
+            { "flow_resistance", "Flow Resistance", "Pa/(L/min)^2", "Valve flow resistance coefficient K",     0.05,  0.0,  10.0,  0.01 }
         };
         d.drawSymbol = DrawThermostat;
         s_library.push_back(d);
@@ -607,8 +611,9 @@ static void InitLibrary() {
             { "coolant_in", 1 }, { "coolant_out", 1 }
         };
         d.params = {
-            { "hose_volume", "Fluid Volume", "L",   "Volume of coolant inside hose",        0.5, 0.01, 5.0, 0.05 },
-            { "heat_loss",   "Heat Loss",    "W/K", "Convection loss to ambient (h*A)",      2.0,  0,   50,  0.5  }
+            { "hose_volume",     "Fluid Volume",    "L",   "Volume of coolant inside hose",        0.5, 0.01, 5.0, 0.05 },
+            { "heat_loss",       "Heat Loss",       "W/K", "Convection loss to ambient (h*A)",      2.0,  0.0, 50.0, 0.5  },
+            { "flow_resistance", "Flow Resistance", "Pa/(L/min)^2", "Hose flow resistance coefficient K", 0.02, 0.0, 10.0, 0.01 }
         };
         d.drawSymbol = DrawHose;
         s_library.push_back(d);
@@ -644,9 +649,10 @@ static void InitLibrary() {
             { "coolant_in",  2 }, { "coolant_out", 2 }
         };
         d.params = {
-            { "oil_coolant_hA", "Oil-Coolant hA", "W/K", "Heat transfer coefficient x area between oil and coolant", 400.0, 10, 3000, 20 },
-            { "oil_volume",     "Oil Volume",      "L",   "Engine oil volume in cooler",                               0.8,  0.05, 10, 0.05 },
-            { "coolant_volume", "Coolant Volume",  "L",   "Coolant volume in cooler",                                  0.5,  0.05, 5,  0.05 }
+            { "oil_coolant_hA",  "Oil-Coolant hA",  "W/K", "Heat transfer coefficient x area between oil and coolant", 400.0, 10.0, 3000.0, 20.0 },
+            { "oil_volume",      "Oil Volume",      "L",   "Engine oil volume in cooler",                               0.8,  0.05, 10.0, 0.05 },
+            { "coolant_volume",  "Coolant Volume",  "L",   "Coolant volume in cooler",                                  0.5,  0.05, 5.0,  0.05 },
+            { "flow_resistance", "Flow Resistance", "Pa/(L/min)^2", "Oil cooler coolant-side flow resistance",          0.03, 0.0,  10.0, 0.01 }
         };
         d.drawSymbol = DrawOilCooler;
         s_library.push_back(d);
@@ -682,9 +688,10 @@ static void InitLibrary() {
             { "air_in",      2 }, { "air_out",     2 }
         };
         d.params = {
-            { "coolant_hA",    "Coolant-Core hA", "W/K", "Coolant-to-core heat transfer",          300.0,  10, 3000, 10  },
-            { "core_capacity", "Core Thermal Mass","J/K","Heater core thermal capacity",             800.0, 100, 5000, 100 },
-            { "coolant_volume","Coolant Volume",   "L",  "Coolant volume in heater core",              0.6, 0.05, 5,  0.05 }
+            { "coolant_hA",      "Coolant-Core hA",  "W/K", "Coolant-to-core heat transfer",          300.0,  10.0, 3000.0, 10.0  },
+            { "core_capacity",   "Core Thermal Mass","J/K","Heater core thermal capacity",             800.0, 100.0, 5000.0, 100.0 },
+            { "coolant_volume",  "Coolant Volume",   "L",  "Coolant volume in heater core",              0.6, 0.05, 5.0,  0.05 },
+            { "flow_resistance", "Flow Resistance",  "Pa/(L/min)^2", "Heater core flow resistance",     0.04, 0.0,  10.0,  0.01 }
         };
         d.drawSymbol = DrawHeaterCore;
         s_library.push_back(d);

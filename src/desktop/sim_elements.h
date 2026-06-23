@@ -95,7 +95,7 @@ public:
         out_h = 40.0f;
     }
 
-    virtual int ResolveSolverNodeId(int link_type, bool is_source_node) const {
+    virtual int ResolveSolverNodeId(int link_type, bool is_source_node, const DesktopNode* other = nullptr) const {
         return id;
     }
 
@@ -147,6 +147,7 @@ public:
         params["block_capacity"] = 55000.0;
         params["block_jacket_cond"] = 1200.0;
         params["jacket_volume"] = 4.5;
+        params["flow_resistance"] = 0.1;
 
         // Sub-node setup
         jacketNode = std::make_shared<DesktopNode>();
@@ -175,8 +176,23 @@ public:
         return { internalCond };
     }
 
-    int ResolveSolverNodeId(int link_type, bool is_source_node) const override {
+    int ResolveSolverNodeId(int link_type, bool is_source_node, const DesktopNode* other = nullptr) const override {
         if (link_type == 3 || link_type == 4) {
+            if (other) {
+                // If it is connected to oil gallery port, return id
+                float min_d = 1e9f;
+                std::string closest_port = "";
+                for (const auto& p : GetPorts()) {
+                    float dist = std::hypot((x + p.dx) - other->x, (y + p.dy) - other->y);
+                    if (dist < min_d) {
+                        min_d = dist;
+                        closest_port = p.id;
+                    }
+                }
+                if (closest_port == "oil_in") {
+                    return id; // block (solid/oil gallery)
+                }
+            }
             return jacketNode->id;
         }
         return id;
@@ -195,7 +211,6 @@ public:
         float W = 70 * z, H = 50 * z;
         ImVec2 tl(c.x - W, c.y - H), br(c.x + W, c.y + H);
 
-        ImU32 bodyFill = temps.empty() ? IM_COL32(40, 25, 10, 240) : IM_COL32(200, 50, 50, 255); // simplified TempToColor
         dl->AddRectFilled(tl, br, IM_COL32(40, 25, 10, 240), 4.0f);
 
         ImU32 hatch = IM_COL32(180, 100, 40, 120);
@@ -245,6 +260,7 @@ public:
         params["air_hA"] = 500.0;
         params["coolant_volume"] = 3.0;
         params["core_capacity"] = 8000.0;
+        params["flow_resistance"] = 0.05;
 
         coreNode = std::make_shared<DesktopNode>();
         coreNode->name = "Radiator Core";
@@ -268,7 +284,7 @@ public:
         return { internalConv };
     }
 
-    int ResolveSolverNodeId(int link_type, bool is_source_node) const override {
+    int ResolveSolverNodeId(int link_type, bool is_source_node, const DesktopNode* other = nullptr) const override {
         if (link_type == 3 || link_type == 4) {
             return id;
         }
@@ -344,6 +360,423 @@ public:
         const char* lbl = "AMBIENT";
         ImVec2 ls = ImGui::CalcTextSize(lbl);
         dl->AddText(ImVec2(c.x - ls.x * 0.5f, c.y + 18 * z), IM_COL32(140, 200, 140, 255), lbl);
+    }
+};
+
+class WaterPumpNode : public DesktopNode {
+public:
+    void GetBounds(float& out_w, float& out_h) const override {
+        out_w = 48.0f;
+        out_h = 48.0f;
+    }
+
+    WaterPumpNode() {
+        name = "Water Pump";
+        domain = 1;
+        fluid_medium = "Water";
+        fluid_volume = 0.5;
+        params["speed"] = 1.0;
+        params["p_max"] = 100000.0;
+        params["q_max"] = 50.0;
+        params["flow_rate"] = 0.0;
+    }
+
+    std::shared_ptr<DesktopNode> clone() const override {
+        return std::make_shared<WaterPumpNode>(*this);
+    }
+
+    std::vector<PortDef> GetPorts() const override {
+        return {
+            { "coolant_in",  "Inlet",  PortType::Coolant, -24, 0, 'L', false },
+            { "coolant_out", "Outlet", PortType::Coolant, +24, 0, 'R', true  }
+        };
+    }
+
+    void DrawSymbol(ImDrawList* dl, ImVec2 c, float z, bool sel, bool running, const std::vector<double>& temps) override {
+        float R = 24 * z;
+        ImU32 border = sel ? IM_COL32(255, 200, 50, 255) : IM_COL32(50, 200, 150, 255);
+        dl->AddCircleFilled(c, R, IM_COL32(10, 35, 28, 230));
+        dl->AddCircle(c, R, border, 32, sel ? 2.5f : 1.5f);
+
+        static float pumpAngle = 0.0f;
+        if (running) {
+            double spd = 1.0;
+            auto it = params.find("speed");
+            if (it != params.end()) spd = it->second;
+            pumpAngle += 0.06f * (float)spd;
+        }
+
+        ImU32 vaneCol = IM_COL32(50, 220, 160, 200);
+        for (int v = 0; v < 3; ++v) {
+            float a = pumpAngle + v * (float)(2.0 * M_PI / 3.0);
+            ImVec2 outer(c.x + R * 0.75f * cosf(a), c.y + R * 0.75f * sinf(a));
+            ImVec2 inner(c.x + R * 0.3f * cosf(a + 0.7f), c.y + R * 0.3f * sinf(a + 0.7f));
+            dl->AddLine(inner, outer, vaneCol, 2.5f * z);
+        }
+
+        float ax = c.x + R + 6 * z;
+        dl->AddLine(ImVec2(c.x + R * 0.7f, c.y), ImVec2(ax, c.y), border, 1.5f);
+        dl->AddTriangleFilled(ImVec2(ax, c.y), ImVec2(ax - 5 * z, c.y - 3 * z), ImVec2(ax - 5 * z, c.y + 3 * z), border);
+
+        dl->AddCircleFilled(c, 4 * z, border);
+
+        const char* lbl = "PUMP";
+        ImVec2 ls = ImGui::CalcTextSize(lbl);
+        dl->AddText(ImVec2(c.x - ls.x * 0.5f, c.y + R + 4 * z), IM_COL32(50, 220, 160, 255), lbl);
+    }
+};
+
+class ThermostatNode : public DesktopNode {
+public:
+    void GetBounds(float& out_w, float& out_h) const override {
+        out_w = 56.0f;
+        out_h = 56.0f;
+    }
+
+    ThermostatNode() {
+        name = "Thermostat";
+        domain = 1;
+        fluid_medium = "Water";
+        fluid_volume = 0.2;
+        params["open_temp"] = 82.0;
+        params["full_open"] = 95.0;
+        params["flow_resistance"] = 0.05;
+    }
+
+    std::shared_ptr<DesktopNode> clone() const override {
+        return std::make_shared<ThermostatNode>(*this);
+    }
+
+    std::vector<PortDef> GetPorts() const override {
+        return {
+            { "inlet",      "Inlet",        PortType::Coolant,  0,  -28, 'T', false },
+            { "main_out",   "Main Circuit",  PortType::Coolant, +28,   0, 'R', true  },
+            { "bypass_out", "Bypass",        PortType::Coolant, -28,   0, 'L', true  }
+        };
+    }
+
+    void DrawSymbol(ImDrawList* dl, ImVec2 c, float z, bool sel, bool running, const std::vector<double>& temps) override {
+        float S = 28 * z;
+
+        ImVec2 top(c.x, c.y - S), bot(c.x, c.y + S);
+        ImVec2 lft(c.x - S, c.y), rgt(c.x + S, c.y);
+
+        ImU32 fill   = IM_COL32(15, 40, 25, 230);
+        ImU32 border = sel ? IM_COL32(255, 200, 50, 255) : IM_COL32(50, 200, 100, 255);
+
+        dl->AddQuadFilled(top, rgt, bot, lft, fill);
+        dl->AddQuad(top, rgt, bot, lft, border, sel ? 2.5f : 1.5f);
+
+        ImU32 spring = IM_COL32(80, 220, 120, 180);
+        int nLines = 4;
+        for (int i = 0; i <= nLines; ++i) {
+            float t = (float)i / nLines;
+            float yy = c.y - S * (1.0f - t * 2.0f) * 0.7f;
+            float xRange = S * (1.0f - std::abs(1.0f - 2.0f * t)) * 0.6f;
+            dl->AddLine(ImVec2(c.x - xRange, yy), ImVec2(c.x + xRange, yy), spring, 1.0f);
+        }
+
+        const char* lbl = "TSTAT";
+        ImVec2 ls = ImGui::CalcTextSize(lbl);
+        dl->AddText(ImVec2(c.x - ls.x * 0.5f, c.y + S + 4 * z), IM_COL32(80, 220, 120, 255), lbl);
+    }
+};
+
+class CoolantHoseNode : public DesktopNode {
+public:
+    void GetBounds(float& out_w, float& out_h) const override {
+        out_w = 100.0f;
+        out_h = 28.0f;
+    }
+
+    CoolantHoseNode() {
+        name = "Coolant Hose";
+        domain = 1;
+        fluid_medium = "Water";
+        fluid_volume = 0.5;
+        params["hose_volume"] = 0.5;
+        params["heat_loss"] = 2.0;
+        params["flow_resistance"] = 0.02;
+    }
+
+    std::shared_ptr<DesktopNode> clone() const override {
+        return std::make_shared<CoolantHoseNode>(*this);
+    }
+
+    std::vector<PortDef> GetPorts() const override {
+        return {
+            { "coolant_in",  "Inlet",  PortType::Coolant, -50, 0, 'L', false },
+            { "coolant_out", "Outlet", PortType::Coolant, +50, 0, 'R', true  }
+        };
+    }
+
+    void DrawSymbol(ImDrawList* dl, ImVec2 c, float z, bool sel, bool running, const std::vector<double>& temps) override {
+        float W = 50 * z, H = 14 * z;
+        ImVec2 tl(c.x - W, c.y - H), br(c.x + W, c.y + H);
+
+        ImU32 fill   = IM_COL32(20, 40, 70, 220);
+        ImU32 border = sel ? IM_COL32(255, 200, 50, 255) : IM_COL32(60, 120, 200, 255);
+
+        dl->AddRectFilled(tl, br, fill, H);
+
+        float flangeW = 5 * z;
+        dl->AddRectFilled(ImVec2(tl.x, tl.y - 3 * z), ImVec2(tl.x + flangeW, br.y + 3 * z), border, 1.0f);
+        dl->AddRectFilled(ImVec2(br.x - flangeW, tl.y - 3 * z), ImVec2(br.x, br.y + 3 * z), border, 1.0f);
+
+        dl->AddRect(tl, br, border, H, 0, sel ? 2.5f : 1.2f);
+
+        if (running) {
+            static float hosePhase = 0.0f;
+            hosePhase += 0.04f;
+            float cx = c.x + (fmodf(hosePhase * 40.0f, W * 2.0f) - W);
+            if (cx > tl.x + 8 * z && cx < br.x - 8 * z) {
+                float ch = 6 * z;
+                dl->AddLine(ImVec2(cx - ch, c.y - ch), ImVec2(cx, c.y), border, 1.5f);
+                dl->AddLine(ImVec2(cx, c.y), ImVec2(cx - ch, c.y + ch), border, 1.5f);
+            }
+        }
+
+        const char* lbl = "HOSE";
+        ImVec2 ls = ImGui::CalcTextSize(lbl);
+        dl->AddText(ImVec2(c.x - ls.x * 0.5f, br.y + 3 * z), IM_COL32(80, 140, 220, 255), lbl);
+    }
+};
+
+class OilCoolerNode : public DesktopNode {
+public:
+    std::shared_ptr<DesktopNode> oilNode;
+    std::shared_ptr<DesktopLink> internalConv;
+
+    void GetBounds(float& out_w, float& out_h) const override {
+        out_w = 80.0f;
+        out_h = 80.0f;
+    }
+
+    OilCoolerNode() {
+        name = "Oil Cooler";
+        domain = 1;
+        fluid_medium = "Water";
+        fluid_volume = 0.5;
+        
+        params["oil_coolant_hA"] = 400.0;
+        params["oil_volume"] = 0.8;
+        params["coolant_volume"] = 0.5;
+        params["flow_resistance"] = 0.03;
+
+        oilNode = std::make_shared<DesktopNode>();
+        oilNode->name = "Oil Cooler (Oil)";
+        oilNode->domain = 1;
+        oilNode->fluid_medium = "Oil";
+        oilNode->fluid_volume = 0.8;
+
+        internalConv = std::make_shared<DesktopLink>();
+        internalConv->type = 1; // Conv
+        internalConv->p1 = 400.0;
+    }
+
+    std::shared_ptr<DesktopNode> clone() const override {
+        auto copy = std::make_shared<OilCoolerNode>(*this);
+        copy->oilNode = std::static_pointer_cast<DesktopNode>(oilNode->clone());
+        copy->internalConv = std::static_pointer_cast<DesktopLink>(internalConv->clone());
+        return copy;
+    }
+
+    std::vector<DesktopNode*> GetSolverNodes() override {
+        return { this, oilNode.get() };
+    }
+
+    std::vector<std::shared_ptr<DesktopLink>> GetInternalLinks() override {
+        return { internalConv };
+    }
+
+    int ResolveSolverNodeId(int link_type, bool is_source_node, const DesktopNode* other = nullptr) const override {
+        if (!other) return id;
+        float min_d = 1e9f;
+        std::string closest_port = "";
+        for (const auto& p : GetPorts()) {
+            float dist = std::hypot((x + p.dx) - other->x, (y + p.dy) - other->y);
+            if (dist < min_d) {
+                min_d = dist;
+                closest_port = p.id;
+            }
+        }
+        if (closest_port == "oil_in" || closest_port == "oil_out") {
+            return oilNode->id;
+        }
+        return id;
+    }
+
+    std::vector<PortDef> GetPorts() const override {
+        return {
+            { "oil_in",      "Oil In",      PortType::Oil,     -40, -20, 'L', false },
+            { "oil_out",     "Oil Out",     PortType::Oil,     -40, +20, 'L', true  },
+            { "coolant_in",  "Coolant In",  PortType::Coolant, +40, -20, 'R', false },
+            { "coolant_out", "Coolant Out", PortType::Coolant, +40, +20, 'R', true  }
+        };
+    }
+
+    void DrawSymbol(ImDrawList* dl, ImVec2 c, float z, bool sel, bool running, const std::vector<double>& temps) override {
+        float W = 40 * z, H = 40 * z;
+        ImVec2 tl(c.x - W, c.y - H), br(c.x + W, c.y + H);
+
+        dl->AddRectFilled(tl, br, IM_COL32(35, 20, 5, 230), 3.0f);
+
+        int nCoils = 5;
+        float coilStep = (H * 2.0f) / (nCoils + 1);
+        for (int i = 1; i <= nCoils; ++i) {
+            float y = tl.y + i * coilStep;
+            ImU32 coilColor = IM_COL32(200, 130, 30, 160);
+            float amp = 6 * z;
+            dl->AddLine(ImVec2(tl.x + 5 * z, y), ImVec2(tl.x + 5 * z + 10 * z, y - amp), coilColor, 1.5f);
+            dl->AddLine(ImVec2(tl.x + 15 * z, y - amp), ImVec2(tl.x + 15 * z + 20 * z, y + amp), coilColor, 1.5f);
+            dl->AddLine(ImVec2(tl.x + 35 * z, y + amp), ImVec2(br.x - 5 * z, y), coilColor, 1.5f);
+        }
+
+        ImU32 border = sel ? IM_COL32(255, 200, 50, 255) : IM_COL32(200, 130, 30, 255);
+        dl->AddRect(tl, br, border, 3.0f, 0, sel ? 2.5f : 1.5f);
+
+        const char* lbl = "OIL COOLER";
+        ImVec2 ls = ImGui::CalcTextSize(lbl);
+        dl->AddText(ImVec2(c.x - ls.x * 0.5f, br.y + 4 * z), IM_COL32(220, 150, 40, 255), lbl);
+    }
+};
+
+class HeaterCoreNode : public DesktopNode {
+public:
+    std::shared_ptr<DesktopNode> coreNode;
+    std::shared_ptr<DesktopLink> internalConv;
+
+    void GetBounds(float& out_w, float& out_h) const override {
+        out_w = 45.0f;
+        out_h = 28.0f;
+    }
+
+    HeaterCoreNode() {
+        name = "Heater Core";
+        domain = 1;
+        fluid_medium = "Water";
+        fluid_volume = 0.6;
+        
+        params["coolant_hA"] = 300.0;
+        params["core_capacity"] = 800.0;
+        params["coolant_volume"] = 0.6;
+        params["flow_resistance"] = 0.04;
+
+        coreNode = std::make_shared<DesktopNode>();
+        coreNode->name = "Heater Core (Core)";
+        coreNode->domain = 0;
+        coreNode->capacity = 800.0;
+
+        internalConv = std::make_shared<DesktopLink>();
+        internalConv->type = 1; // Conv
+        internalConv->p1 = 300.0;
+    }
+
+    std::shared_ptr<DesktopNode> clone() const override {
+        auto copy = std::make_shared<HeaterCoreNode>(*this);
+        copy->coreNode = std::static_pointer_cast<DesktopNode>(coreNode->clone());
+        copy->internalConv = std::static_pointer_cast<DesktopLink>(internalConv->clone());
+        return copy;
+    }
+
+    std::vector<DesktopNode*> GetSolverNodes() override {
+        return { this, coreNode.get() };
+    }
+
+    std::vector<std::shared_ptr<DesktopLink>> GetInternalLinks() override {
+        return { internalConv };
+    }
+
+    int ResolveSolverNodeId(int link_type, bool is_source_node, const DesktopNode* other = nullptr) const override {
+        if (link_type == 3 || link_type == 4) {
+            return id;
+        }
+        return coreNode->id;
+    }
+
+    std::vector<PortDef> GetPorts() const override {
+        return {
+            { "coolant_in",  "Coolant In",  PortType::Coolant, -45, 0, 'L', false },
+            { "coolant_out", "Outlet",      PortType::Coolant, +45, 0, 'R', true  },
+            { "air_in",      "Cabin Air In",PortType::Air,       0,-28, 'T', false },
+            { "air_out",     "Warm Air Out",PortType::Air,       0,+28, 'B', true  }
+        };
+    }
+
+    void DrawSymbol(ImDrawList* dl, ImVec2 c, float z, bool sel, bool running, const std::vector<double>& temps) override {
+        float W = 45 * z, H = 28 * z;
+        ImVec2 tl(c.x - W, c.y - H), br(c.x + W, c.y + H);
+
+        dl->AddRectFilled(tl, br, IM_COL32(40, 10, 10, 230), 3.0f);
+
+        int nFins = 7;
+        float finStep = (H * 2.0f) / (nFins + 1);
+        for (int i = 1; i <= nFins; ++i) {
+            float fy = tl.y + i * finStep;
+            dl->AddLine(ImVec2(tl.x + 4 * z, fy), ImVec2(br.x - 4 * z, fy),
+                        IM_COL32(220, 80, 80, 160), 1.0f);
+        }
+
+        float hdrW = 7 * z;
+        dl->AddRectFilled(tl, ImVec2(tl.x + hdrW, br.y), IM_COL32(160, 50, 50, 200));
+        dl->AddRectFilled(ImVec2(br.x - hdrW, tl.y), br, IM_COL32(160, 50, 50, 200));
+
+        ImU32 border = sel ? IM_COL32(255, 200, 50, 255) : IM_COL32(220, 80, 80, 255);
+        dl->AddRect(tl, br, border, 3.0f, 0, sel ? 2.5f : 1.5f);
+
+        const char* lbl = "HTR CORE";
+        ImVec2 ls = ImGui::CalcTextSize(lbl);
+        dl->AddText(ImVec2(c.x - ls.x * 0.5f, br.y + 4 * z), IM_COL32(220, 100, 100, 255), lbl);
+    }
+};
+
+class ExpansionTankNode : public DesktopNode {
+public:
+    void GetBounds(float& out_w, float& out_h) const override {
+        out_w = 22.0f;
+        out_h = 35.0f;
+    }
+
+    ExpansionTankNode() {
+        name = "Expansion Tank";
+        domain = 1;
+        fluid_medium = "Water";
+        fluid_volume = 1.5;
+        params["tank_volume"] = 1.5;
+    }
+
+    std::shared_ptr<DesktopNode> clone() const override {
+        return std::make_shared<ExpansionTankNode>(*this);
+    }
+
+    std::vector<PortDef> GetPorts() const override {
+        return {
+            { "coolant_port", "Coolant", PortType::Coolant, 0, +35, 'B', false }
+        };
+    }
+
+    void DrawSymbol(ImDrawList* dl, ImVec2 c, float z, bool sel, bool running, const std::vector<double>& temps) override {
+        float W = 22 * z, H = 35 * z;
+        ImVec2 tl(c.x - W, c.y - H), br(c.x + W, c.y + H);
+
+        dl->AddRectFilled(tl, br, IM_COL32(15, 35, 60, 230), 6.0f);
+
+        float levelY = tl.y + (H * 2.0f) * 0.3f;
+        dl->AddRectFilled(ImVec2(tl.x + 2 * z, levelY), ImVec2(br.x - 2 * z, br.y - 4 * z),
+                          IM_COL32(40, 90, 160, 180), 4.0f);
+
+        dl->AddLine(ImVec2(tl.x + 3 * z, levelY), ImVec2(br.x - 3 * z, levelY),
+                    IM_COL32(80, 160, 220, 220), 1.5f);
+
+        dl->AddRectFilled(ImVec2(c.x - 8 * z, tl.y - 5 * z), ImVec2(c.x + 8 * z, tl.y + 1 * z),
+                          IM_COL32(60, 80, 110, 220), 3.0f);
+
+        ImU32 border = sel ? IM_COL32(255, 200, 50, 255) : IM_COL32(60, 130, 210, 255);
+        dl->AddRect(tl, br, border, 6.0f, 0, sel ? 2.5f : 1.5f);
+
+        const char* lbl = "EXP TANK";
+        ImVec2 ls = ImGui::CalcTextSize(lbl);
+        dl->AddText(ImVec2(c.x - ls.x * 0.5f, br.y + 4 * z), IM_COL32(80, 150, 220, 255), lbl);
     }
 };
 
