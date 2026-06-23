@@ -6,6 +6,10 @@
 #include <unordered_map>
 #include "../../thirdparty/imgui/imgui.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846 // pi
+#endif
+
 // Forward declaration of ThermalSystem (from solver.h)
 class ThermalSystem;
 
@@ -123,8 +127,7 @@ public:
         dl->AddRectFilled(tl, br, IM_COL32(30, 40, 50, 230), 4.0f);
         dl->AddRect(tl, br, col, 4.0f, 0, selected ? 2.5f : 1.5f);
         
-        ImVec2 ts = ImGui::CalcTextSize(name.c_str());
-        dl->AddText(ImVec2(canvas_pos.x - ts.x/2, canvas_pos.y - ts.y/2), IM_COL32(255,255,255,255), name.c_str());
+        // Text is drawn by the canvas layer so long generic labels can be clipped consistently.
     }
 };
 

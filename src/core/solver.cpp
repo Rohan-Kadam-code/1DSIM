@@ -6,49 +6,56 @@
 static void GetFluidProperties(const ThermalNode& node, double T_c, double& rho, double& drho, double& cp, double& dcp) {
     const std::string& medium = node.fluid_medium;
     if (medium == "Water") {
-        rho = 1000.0 - 0.0178 * T_c - 0.00557 * T_c * T_c + 0.000027 * T_c * T_c * T_c;
-        drho = -0.0178 - 0.01114 * T_c + 0.000081 * T_c * T_c;
+        double T_clamp = std::max(0.0, std::min(T_c, 150.0));
+        rho = 1000.0 - 0.0178 * T_clamp - 0.00557 * T_clamp * T_clamp + 0.000027 * T_clamp * T_clamp * T_clamp;
+        drho = -0.0178 - 0.01114 * T_clamp + 0.000081 * T_clamp * T_clamp;
         
-        cp = 4184.0 - 0.09 * T_c + 0.006 * T_c * T_c;
-        dcp = -0.09 + 0.012 * T_c;
+        cp = 4184.0 - 0.09 * T_clamp + 0.006 * T_clamp * T_clamp;
+        dcp = -0.09 + 0.012 * T_clamp;
     }
     else if (medium == "Glycol") { // Water-Glycol 50/50
-        rho = 1060.0 - 0.65 * T_c;
+        double T_clamp = std::max(-40.0, std::min(T_c, 200.0));
+        rho = 1060.0 - 0.65 * T_clamp;
         drho = -0.65;
         
-        cp = 3300.0 + 3.5 * T_c;
+        cp = 3300.0 + 3.5 * T_clamp;
         dcp = 3.5;
     }
     else if (medium == "Oil") { // Engine Oil
-        rho = 890.0 - 0.60 * T_c;
+        double T_clamp = std::max(-40.0, std::min(T_c, 250.0));
+        rho = 890.0 - 0.60 * T_clamp;
         drho = -0.60;
         
-        cp = 1800.0 + 3.0 * T_c;
+        cp = 1800.0 + 3.0 * T_clamp;
         dcp = 3.0;
     }
     else if (medium == "Air") {
-        double denom = T_c + 273.15;
+        double T_clamp = std::max(-150.0, std::min(T_c, 1000.0));
+        double denom = T_clamp + 273.15;
         if (denom < 10.0) denom = 10.0;
         rho = 353.18295 / denom;
         drho = -353.18295 / (denom * denom);
         
-        cp = 1005.0 + 0.05 * T_c;
+        cp = 1005.0 + 0.05 * T_clamp;
         dcp = 0.05;
     }
     else if (medium == "Mixture") { // Water-Glycol mixture with user-defined ratio
         double r = node.fluid_mix_ratio; // glycol fraction (0.0 = pure water, 1.0 = pure glycol)
         double ir = 1.0 - r;
         
+        double T_clamp_w = std::max(0.0, std::min(T_c, 150.0));
+        double T_clamp_g = std::max(-40.0, std::min(T_c, 200.0));
+        
         // Water properties
-        double rho_w = 1000.0 - 0.0178 * T_c - 0.00557 * T_c * T_c + 0.000027 * T_c * T_c * T_c;
-        double drho_w = -0.0178 - 0.01114 * T_c + 0.000081 * T_c * T_c;
-        double cp_w = 4184.0 - 0.09 * T_c + 0.006 * T_c * T_c;
-        double dcp_w = -0.09 + 0.012 * T_c;
+        double rho_w = 1000.0 - 0.0178 * T_clamp_w - 0.00557 * T_clamp_w * T_clamp_w + 0.000027 * T_clamp_w * T_clamp_w * T_clamp_w;
+        double drho_w = -0.0178 - 0.01114 * T_clamp_w + 0.000081 * T_clamp_w * T_clamp_w;
+        double cp_w = 4184.0 - 0.09 * T_clamp_w + 0.006 * T_clamp_w * T_clamp_w;
+        double dcp_w = -0.09 + 0.012 * T_clamp_w;
         
         // Pure Glycol properties
-        double rho_g = 1060.0 - 0.65 * T_c;
+        double rho_g = 1060.0 - 0.65 * T_clamp_g;
         double drho_g = -0.65;
-        double cp_g = 3300.0 + 3.5 * T_c;
+        double cp_g = 3300.0 + 3.5 * T_clamp_g;
         double dcp_g = 3.5;
         
         // Linear interpolation by mass/volume fraction
@@ -58,16 +65,27 @@ static void GetFluidProperties(const ThermalNode& node, double T_c, double& rho,
         dcp = ir * dcp_w + r * dcp_g;
     }
     else if (medium == "Custom") { // User-defined polynomial coefficients
-        rho = node.fluid_rho_a0 + node.fluid_rho_a1 * T_c + node.fluid_rho_a2 * T_c * T_c;
-        drho = node.fluid_rho_a1 + 2.0 * node.fluid_rho_a2 * T_c;
+        double T_clamp = std::max(-100.0, std::min(T_c, 1000.0));
+        rho = node.fluid_rho_a0 + node.fluid_rho_a1 * T_clamp + node.fluid_rho_a2 * T_clamp * T_clamp;
+        drho = node.fluid_rho_a1 + 2.0 * node.fluid_rho_a2 * T_clamp;
         
-        cp = node.fluid_cp_a0 + node.fluid_cp_a1 * T_c + node.fluid_cp_a2 * T_c * T_c;
-        dcp = node.fluid_cp_a1 + 2.0 * node.fluid_cp_a2 * T_c;
+        cp = node.fluid_cp_a0 + node.fluid_cp_a1 * T_clamp + node.fluid_cp_a2 * T_clamp * T_clamp;
+        dcp = node.fluid_cp_a1 + 2.0 * node.fluid_cp_a2 * T_clamp;
     }
     else { // Fallback (Water-like)
         rho = 1000.0;
         drho = 0.0;
         cp = 4184.0;
+        dcp = 0.0;
+    }
+
+    // Safeguard to prevent negative/unphysical values
+    if (rho < 0.01) {
+        rho = 0.01;
+        drho = 0.0;
+    }
+    if (cp < 10.0) {
+        cp = 10.0;
         dcp = 0.0;
     }
 }
@@ -336,6 +354,7 @@ void ThermalSystem::step_explicit_euler(double dt) {
         double C = 0.0, dC = 0.0;
         GetNodeCapacityAndDeriv(nodes[i], current_temps[i], C, dC);
         next_temps[i] = current_temps[i] + (dt / C) * q_net;
+        if (next_temps[i] < 0.1) next_temps[i] = 0.1;
     }
 
     for (size_t i = 0; i < nodes.size(); ++i) {
@@ -366,6 +385,7 @@ void ThermalSystem::step_rk4(double dt) {
     std::vector<double> T1(n);
     for (size_t i = 0; i < n; ++i) {
         T1[i] = nodes[i].is_fixed ? T0[i] : T0[i] + 0.5 * dt * k1[i];
+        if (T1[i] < 0.1) T1[i] = 0.1;
     }
 
     // k2
@@ -382,6 +402,7 @@ void ThermalSystem::step_rk4(double dt) {
     std::vector<double> T2(n);
     for (size_t i = 0; i < n; ++i) {
         T2[i] = nodes[i].is_fixed ? T0[i] : T0[i] + 0.5 * dt * k2[i];
+        if (T2[i] < 0.1) T2[i] = 0.1;
     }
 
     // k3
@@ -398,6 +419,7 @@ void ThermalSystem::step_rk4(double dt) {
     std::vector<double> T3(n);
     for (size_t i = 0; i < n; ++i) {
         T3[i] = nodes[i].is_fixed ? T0[i] : T0[i] + dt * k3[i];
+        if (T3[i] < 0.1) T3[i] = 0.1;
     }
 
     // k4
@@ -414,6 +436,7 @@ void ThermalSystem::step_rk4(double dt) {
     for (size_t i = 0; i < n; ++i) {
         if (nodes[i].is_fixed) continue;
         nodes[i].temperature = T0[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
+        if (nodes[i].temperature < 0.1) nodes[i].temperature = 0.1;
     }
 }
 
@@ -537,6 +560,7 @@ int ThermalSystem::solve_steady_state(double tolerance, int max_iterations) {
                 T_new = T_curr;
             }
 
+            if (T_new < 0.1) T_new = 0.1;
             nodes[i].temperature = T_new;
             
             double diff = std::abs(T_new - T_old);
@@ -620,9 +644,8 @@ void ThermalSystem::step_backward_euler(double dt, double tolerance, int max_ite
                 R[i] = T_curr[i] - T_prev[i];
                 J[i][i] = 1.0;
             } else {
-                double C = nodes[i].capacity + nodes[i].c_a1 * T_curr[i] + nodes[i].c_a2 * T_curr[i] * T_curr[i];
-                double dC = nodes[i].c_a1 + 2.0 * nodes[i].c_a2 * T_curr[i];
-                if (C < 0.1) C = 0.1;
+                double C = 0.0, dC = 0.0;
+                GetNodeCapacityAndDeriv(nodes[i], T_curr[i], C, dC);
 
                 R[i] = C * (T_curr[i] - T_prev[i]) - dt * nodes[i].q_gen;
                 J[i][i] = C + dC * (T_curr[i] - T_prev[i]);
@@ -714,7 +737,7 @@ void ThermalSystem::step_backward_euler(double dt, double tolerance, int max_ite
         for (size_t i = 0; i < n; ++i) {
             if (!nodes[i].is_fixed) {
                 T_curr[i] += b[i];
-                if (T_curr[i] < 0.0) T_curr[i] = 0.0; // Enforce physical temperatures >= 0 K
+                if (T_curr[i] < 0.1) T_curr[i] = 0.1; // Enforce physical temperatures >= 0.1 K
                 max_delta = std::max(max_delta, std::abs(b[i]));
             }
         }

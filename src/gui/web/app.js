@@ -1158,41 +1158,47 @@ function syncNodeProperties(node) {
         
         let rho = 0.0, drho = 0.0, cp = 0.0, dcp = 0.0;
         if (medium === "Water") {
-            rho = 1000.0 - 0.0178 * T_c - 0.00557 * T_c * T_c + 0.000027 * T_c * T_c * T_c;
-            drho = -0.0178 - 0.01114 * T_c + 0.000081 * T_c * T_c;
-            cp = 4184.0 - 0.09 * T_c + 0.006 * T_c * T_c;
-            dcp = -0.09 + 0.012 * T_c;
+            const T_clamp = Math.max(0.0, Math.min(T_c, 150.0));
+            rho = 1000.0 - 0.0178 * T_clamp - 0.00557 * T_clamp * T_clamp + 0.000027 * T_clamp * T_clamp * T_clamp;
+            drho = -0.0178 - 0.01114 * T_clamp + 0.000081 * T_clamp * T_clamp;
+            cp = 4184.0 - 0.09 * T_clamp + 0.006 * T_clamp * T_clamp;
+            dcp = -0.09 + 0.012 * T_clamp;
         } else if (medium === "Glycol") {
-            rho = 1060.0 - 0.65 * T_c;
+            const T_clamp = Math.max(-40.0, Math.min(T_c, 200.0));
+            rho = 1060.0 - 0.65 * T_clamp;
             drho = -0.65;
-            cp = 3300.0 + 3.5 * T_c;
+            cp = 3300.0 + 3.5 * T_clamp;
             dcp = 3.5;
         } else if (medium === "Oil") {
-            rho = 890.0 - 0.60 * T_c;
+            const T_clamp = Math.max(-40.0, Math.min(T_c, 250.0));
+            rho = 890.0 - 0.60 * T_clamp;
             drho = -0.60;
-            cp = 1800.0 + 3.0 * T_c;
+            cp = 1800.0 + 3.0 * T_clamp;
             dcp = 3.0;
         } else if (medium === "Air") {
-            let T_k = T_c + 273.15;
-            let denom = (T_k < 10.0) ? 10.0 : T_k;
+            const T_clamp = Math.max(-150.0, Math.min(T_c, 1000.0));
+            const T_k = T_clamp + 273.15;
+            const denom = (T_k < 10.0) ? 10.0 : T_k;
             rho = 353.18295 / denom;
             drho = -353.18295 / (denom * denom);
-            cp = 1005.0 + 0.05 * T_c;
+            cp = 1005.0 + 0.05 * T_clamp;
             dcp = 0.05;
         } else if (medium === "Mixture") {
             const r = node.fluid_mix_ratio !== undefined ? node.fluid_mix_ratio : 0.5;
             const ir = 1.0 - r;
+            const T_clamp_w = Math.max(0.0, Math.min(T_c, 150.0));
+            const T_clamp_g = Math.max(-40.0, Math.min(T_c, 200.0));
             
             // Water properties
-            const rho_w = 1000.0 - 0.0178 * T_c - 0.00557 * T_c * T_c + 0.000027 * T_c * T_c * T_c;
-            const drho_w = -0.0178 - 0.01114 * T_c + 0.000081 * T_c * T_c;
-            const cp_w = 4184.0 - 0.09 * T_c + 0.006 * T_c * T_c;
-            const dcp_w = -0.09 + 0.012 * T_c;
+            const rho_w = 1000.0 - 0.0178 * T_clamp_w - 0.00557 * T_clamp_w * T_clamp_w + 0.000027 * T_clamp_w * T_clamp_w * T_clamp_w;
+            const drho_w = -0.0178 - 0.01114 * T_clamp_w + 0.000081 * T_clamp_w * T_clamp_w;
+            const cp_w = 4184.0 - 0.09 * T_clamp_w + 0.006 * T_clamp_w * T_clamp_w;
+            const dcp_w = -0.09 + 0.012 * T_clamp_w;
             
             // Pure Glycol properties
-            const rho_g = 1060.0 - 0.65 * T_c;
+            const rho_g = 1060.0 - 0.65 * T_clamp_g;
             const drho_g = -0.65;
-            const cp_g = 3300.0 + 3.5 * T_c;
+            const cp_g = 3300.0 + 3.5 * T_clamp_g;
             const dcp_g = 3.5;
             
             rho = ir * rho_w + r * rho_g;
@@ -1208,14 +1214,25 @@ function syncNodeProperties(node) {
             const cp_a1 = node.fluid_cp_a1 !== undefined ? node.fluid_cp_a1 : 0.0;
             const cp_a2 = node.fluid_cp_a2 !== undefined ? node.fluid_cp_a2 : 0.0;
             
-            rho = rho_a0 + rho_a1 * T_c + rho_a2 * T_c * T_c;
-            drho = rho_a1 + 2.0 * rho_a2 * T_c;
-            cp = cp_a0 + cp_a1 * T_c + cp_a2 * T_c * T_c;
-            dcp = cp_a1 + 2.0 * cp_a2 * T_c;
+            const T_clamp = Math.max(-100.0, Math.min(T_c, 1000.0));
+            rho = rho_a0 + rho_a1 * T_clamp + rho_a2 * T_clamp * T_clamp;
+            drho = rho_a1 + 2.0 * rho_a2 * T_clamp;
+            cp = cp_a0 + cp_a1 * T_clamp + cp_a2 * T_clamp * T_clamp;
+            dcp = cp_a1 + 2.0 * cp_a2 * T_clamp;
         } else {
             rho = 1000.0;
             drho = 0.0;
             cp = 4184.0;
+            dcp = 0.0;
+        }
+        
+        // Safeguard to prevent negative/unphysical values
+        if (rho < 0.01) {
+            rho = 0.01;
+            drho = 0.0;
+        }
+        if (cp < 10.0) {
+            cp = 10.0;
             dcp = 0.0;
         }
         

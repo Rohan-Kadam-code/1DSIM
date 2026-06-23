@@ -433,40 +433,46 @@ void GetDesktopNodeProperties(const std::shared_ptr<DesktopNode>& node, double& 
         double rho = 0.0, drho = 0.0, cp = 0.0, dcp = 0.0;
         std::string medium = node->fluid_medium;
         if (medium == "Water") {
-            rho = 1000.0 - 0.0178 * T_c - 0.00557 * T_c * T_c + 0.000027 * T_c * T_c * T_c;
-            drho = -0.0178 - 0.01114 * T_c + 0.000081 * T_c * T_c;
-            cp = 4184.0 - 0.09 * T_c + 0.006 * T_c * T_c;
-            dcp = -0.09 + 0.012 * T_c;
+            double T_clamp = std::max(0.0, std::min(T_c, 150.0));
+            rho = 1000.0 - 0.0178 * T_clamp - 0.00557 * T_clamp * T_clamp + 0.000027 * T_clamp * T_clamp * T_clamp;
+            drho = -0.0178 - 0.01114 * T_clamp + 0.000081 * T_clamp * T_clamp;
+            cp = 4184.0 - 0.09 * T_clamp + 0.006 * T_clamp * T_clamp;
+            dcp = -0.09 + 0.012 * T_clamp;
         } else if (medium == "Glycol") {
-            rho = 1060.0 - 0.65 * T_c;
+            double T_clamp = std::max(-40.0, std::min(T_c, 200.0));
+            rho = 1060.0 - 0.65 * T_clamp;
             drho = -0.65;
-            cp = 3300.0 + 3.5 * T_c;
+            cp = 3300.0 + 3.5 * T_clamp;
             dcp = 3.5;
         } else if (medium == "Oil") {
-            rho = 890.0 - 0.60 * T_c;
+            double T_clamp = std::max(-40.0, std::min(T_c, 250.0));
+            rho = 890.0 - 0.60 * T_clamp;
             drho = -0.60;
-            cp = 1800.0 + 3.0 * T_c;
+            cp = 1800.0 + 3.0 * T_clamp;
             dcp = 3.0;
         } else if (medium == "Air") {
-            double denom = T_c + 273.15;
+            double T_clamp = std::max(-150.0, std::min(T_c, 1000.0));
+            double denom = T_clamp + 273.15;
             if (denom < 10.0) denom = 10.0;
             rho = 353.18295 / denom;
             drho = -353.18295 / (denom * denom);
-            cp = 1005.0 + 0.05 * T_c;
+            cp = 1005.0 + 0.05 * T_clamp;
             dcp = 0.05;
         } else if (medium == "Mixture") {
             double r = node->fluid_mix_ratio;
             double ir = 1.0 - r;
+            double T_clamp_w = std::max(0.0, std::min(T_c, 150.0));
+            double T_clamp_g = std::max(-40.0, std::min(T_c, 200.0));
             // Water properties
-            double rho_w = 1000.0 - 0.0178 * T_c - 0.00557 * T_c * T_c + 0.000027 * T_c * T_c * T_c;
-            double drho_w = -0.0178 - 0.01114 * T_c + 0.000081 * T_c * T_c;
-            double cp_w = 4184.0 - 0.09 * T_c + 0.006 * T_c * T_c;
-            double dcp_w = -0.09 + 0.012 * T_c;
+            double rho_w = 1000.0 - 0.0178 * T_clamp_w - 0.00557 * T_clamp_w * T_clamp_w + 0.000027 * T_clamp_w * T_clamp_w * T_clamp_w;
+            double drho_w = -0.0178 - 0.01114 * T_clamp_w + 0.000081 * T_clamp_w * T_clamp_w;
+            double cp_w = 4184.0 - 0.09 * T_clamp_w + 0.006 * T_clamp_w * T_clamp_w;
+            double dcp_w = -0.09 + 0.012 * T_clamp_w;
             
             // Pure Glycol properties
-            double rho_g = 1060.0 - 0.65 * T_c;
+            double rho_g = 1060.0 - 0.65 * T_clamp_g;
             double drho_g = -0.65;
-            double cp_g = 3300.0 + 3.5 * T_c;
+            double cp_g = 3300.0 + 3.5 * T_clamp_g;
             double dcp_g = 3.5;
             
             rho = ir * rho_w + r * rho_g;
@@ -474,13 +480,25 @@ void GetDesktopNodeProperties(const std::shared_ptr<DesktopNode>& node, double& 
             cp = ir * cp_w + r * cp_g;
             dcp = ir * dcp_w + r * dcp_g;
         } else if (medium == "Custom") {
-            rho = node->fluid_rho_a0 + node->fluid_rho_a1 * T_c + node->fluid_rho_a2 * T_c * T_c;
-            drho = node->fluid_rho_a1 + 2.0 * node->fluid_rho_a2 * T_c;
-            cp = node->fluid_cp_a0 + node->fluid_cp_a1 * T_c + node->fluid_cp_a2 * T_c * T_c;
-            dcp = node->fluid_cp_a1 + 2.0 * node->fluid_cp_a2 * T_c;
+            double T_clamp = std::max(-100.0, std::min(T_c, 1000.0));
+            rho = node->fluid_rho_a0 + node->fluid_rho_a1 * T_clamp + node->fluid_rho_a2 * T_clamp * T_clamp;
+            drho = node->fluid_rho_a1 + 2.0 * node->fluid_rho_a2 * T_clamp;
+            cp = node->fluid_cp_a0 + node->fluid_cp_a1 * T_clamp + node->fluid_cp_a2 * T_clamp * T_clamp;
+            dcp = node->fluid_cp_a1 + 2.0 * node->fluid_cp_a2 * T_clamp;
         } else {
             rho = 1000.0; drho = 0.0; cp = 4184.0; dcp = 0.0;
         }
+
+        // Safeguard to prevent negative/unphysical values
+        if (rho < 0.01) {
+            rho = 0.01;
+            drho = 0.0;
+        }
+        if (cp < 10.0) {
+            cp = 10.0;
+            dcp = 0.0;
+        }
+
         double V_m3 = node->fluid_volume * 1e-3;
         cap = rho * V_m3 * cp;
         ca1 = V_m3 * (rho * dcp + cp * drho);
@@ -1033,6 +1051,190 @@ void LoadPreset(const std::string& key) {
             { "wind_convection", "Wind Heat Transfer (W/K)", 5.0f, 100.0f, 30.0f, 2.0f, "link", 104, {}, "p1" }
         };
     }
+    else if (key == "complete_loop") {
+        // 1. Engine Block
+        auto engine = std::make_shared<EngineBlockNode>();
+        engine->id = 100;
+        engine->x = 160.0f;
+        engine->y = 280.0f;
+        engine->jacketNode->id = 101;
+        engine->internalCond->id = 102;
+        engine->internalCond->node_a = 100;
+        engine->internalCond->node_b = 101;
+        engine->capacity = engine->params["block_capacity"];
+        engine->q_gen = engine->params["heat_rejection"];
+        engine->jacketNode->fluid_volume = engine->params["jacket_volume"];
+        engine->internalCond->p1 = engine->params["block_jacket_cond"];
+        g_nodes.push_back(engine);
+
+        // 2. Hose 1 (Engine to Tstat)
+        auto hose1 = std::make_shared<CoolantHoseNode>();
+        hose1->id = 600;
+        hose1->name = "Hose: Engine to Tstat";
+        hose1->x = 310.0f;
+        hose1->y = 200.0f;
+        hose1->temp = 25.0;
+        hose1->fluid_volume = 0.5;
+        g_nodes.push_back(hose1);
+
+        // 3. Thermostat
+        auto tstat = std::make_shared<ThermostatNode>();
+        tstat->id = 500;
+        tstat->x = 460.0f;
+        tstat->y = 200.0f;
+        tstat->temp = 25.0;
+        tstat->fluid_volume = 0.2;
+        g_nodes.push_back(tstat);
+
+        // 4. Hose 2 (Tstat to Radiator)
+        auto hose2 = std::make_shared<CoolantHoseNode>();
+        hose2->id = 610;
+        hose2->name = "Hose: Tstat to Radiator";
+        hose2->x = 610.0f;
+        hose2->y = 200.0f;
+        hose2->temp = 25.0;
+        hose2->fluid_volume = 0.5;
+        g_nodes.push_back(hose2);
+
+        // 5. Radiator
+        auto radiator = std::make_shared<RadiatorNode>();
+        radiator->id = 200;
+        radiator->x = 760.0f;
+        radiator->y = 280.0f;
+        radiator->coreNode->id = 201;
+        radiator->internalConv->id = 202;
+        radiator->internalConv->node_a = 200;
+        radiator->internalConv->node_b = 201;
+        radiator->fluid_volume = radiator->params["coolant_volume"];
+        radiator->coreNode->capacity = radiator->params["core_capacity"];
+        radiator->internalConv->p1 = radiator->params["coolant_hA"];
+        g_nodes.push_back(radiator);
+
+        // 6. Hose 3 (Radiator to Pump)
+        auto hose3 = std::make_shared<CoolantHoseNode>();
+        hose3->id = 620;
+        hose3->name = "Hose: Radiator to Pump";
+        hose3->x = 610.0f;
+        hose3->y = 420.0f;
+        hose3->temp = 25.0;
+        hose3->fluid_volume = 0.5;
+        g_nodes.push_back(hose3);
+
+        // 7. Water Pump
+        auto pump = std::make_shared<WaterPumpNode>();
+        pump->id = 400;
+        pump->x = 460.0f;
+        pump->y = 420.0f;
+        pump->temp = 25.0;
+        pump->fluid_volume = 0.5;
+        g_nodes.push_back(pump);
+
+        // 8. Hose 4 (Bypass to Pump)
+        auto hose4 = std::make_shared<CoolantHoseNode>();
+        hose4->id = 630;
+        hose4->name = "Hose: Bypass to Pump";
+        hose4->x = 310.0f;
+        hose4->y = 320.0f;
+        hose4->temp = 25.0;
+        hose4->fluid_volume = 0.5;
+        g_nodes.push_back(hose4);
+
+        // 9. Hose 5 (Pump to Engine)
+        auto hose5 = std::make_shared<CoolantHoseNode>();
+        hose5->id = 640;
+        hose5->name = "Hose: Pump to Engine";
+        hose5->x = 200.0f;
+        hose5->y = 420.0f;
+        hose5->temp = 25.0;
+        hose5->fluid_volume = 0.5;
+        g_nodes.push_back(hose5);
+
+        // 10. Expansion Tank
+        auto tank = std::make_shared<ExpansionTankNode>();
+        tank->id = 700;
+        tank->x = 460.0f;
+        tank->y = 80.0f;
+        tank->temp = 25.0;
+        tank->fluid_volume = 1.5;
+        g_nodes.push_back(tank);
+
+        // 11. Ambient Air
+        auto ambient = std::make_shared<AmbientAirNode>();
+        ambient->id = 300;
+        ambient->x = 900.0f;
+        ambient->y = 280.0f;
+        ambient->temp = ambient->params["temp_c"];
+        g_nodes.push_back(ambient);
+
+        // --- Links ---
+        // Engine -> Hose 1
+        auto l1 = std::make_shared<DesktopLink>();
+        l1->id = 1001; l1->node_a = 100; l1->node_b = 600; l1->type = 3; l1->p1 = 35.0; l1->p2 = 1.0;
+        g_links.push_back(l1);
+
+        // Hose 1 -> Thermostat
+        auto l2 = std::make_shared<DesktopLink>();
+        l2->id = 1002; l2->node_a = 600; l2->node_b = 500; l2->type = 3; l2->p1 = 35.0; l2->p2 = 1.0;
+        g_links.push_back(l2);
+
+        // Thermostat -> Hose 2 (Main)
+        auto l3 = std::make_shared<DesktopLink>();
+        l3->id = 1003; l3->node_a = 500; l3->node_b = 610; l3->type = 3; l3->p1 = 0.0; l3->p2 = 1.0;
+        g_links.push_back(l3);
+
+        // Hose 2 -> Radiator
+        auto l4 = std::make_shared<DesktopLink>();
+        l4->id = 1004; l4->node_a = 610; l4->node_b = 200; l4->type = 3; l4->p1 = 0.0; l4->p2 = 1.0;
+        g_links.push_back(l4);
+
+        // Radiator -> Hose 3
+        auto l5 = std::make_shared<DesktopLink>();
+        l5->id = 1005; l5->node_a = 200; l5->node_b = 620; l5->type = 3; l5->p1 = 0.0; l5->p2 = 1.0;
+        g_links.push_back(l5);
+
+        // Hose 3 -> Pump
+        auto l6 = std::make_shared<DesktopLink>();
+        l6->id = 1006; l6->node_a = 620; l6->node_b = 400; l6->type = 3; l6->p1 = 0.0; l6->p2 = 1.0;
+        g_links.push_back(l6);
+
+        // Thermostat -> Hose 4 (Bypass)
+        auto l7 = std::make_shared<DesktopLink>();
+        l7->id = 1007; l7->node_a = 500; l7->node_b = 630; l7->type = 3; l7->p1 = 35.0; l7->p2 = 1.0;
+        g_links.push_back(l7);
+
+        // Hose 4 -> Pump
+        auto l8 = std::make_shared<DesktopLink>();
+        l8->id = 1008; l8->node_a = 630; l8->node_b = 400; l8->type = 3; l8->p1 = 35.0; l8->p2 = 1.0;
+        g_links.push_back(l8);
+
+        // Pump -> Hose 5
+        auto l9 = std::make_shared<DesktopLink>();
+        l9->id = 1009; l9->node_a = 400; l9->node_b = 640; l9->type = 3; l9->p1 = 35.0; l9->p2 = 1.0;
+        g_links.push_back(l9);
+
+        // Hose 5 -> Engine
+        auto l10 = std::make_shared<DesktopLink>();
+        l10->id = 1010; l10->node_a = 640; l10->node_b = 100; l10->type = 3; l10->p1 = 35.0; l10->p2 = 1.0;
+        g_links.push_back(l10);
+
+        // Radiator Core -> Ambient Air Convection
+        auto l11 = std::make_shared<DesktopLink>();
+        l11->id = 1011; l11->node_a = 200; l11->node_b = 300; l11->type = 1; l11->p1 = 600.0; l11->p2 = 0.0;
+        g_links.push_back(l11);
+
+        // Expansion Tank -> Hose 3 Conduction
+        auto l12 = std::make_shared<DesktopLink>();
+        l12->id = 1012; l12->node_a = 700; l12->node_b = 620; l12->type = 0; l12->p1 = 0.5; l12->p2 = 0.0;
+        g_links.push_back(l12);
+
+        // --- SLIDERS ---
+        g_sliders = {
+            { "engine_power", "Engine Heat Output (kW)", 0.0f, 120.0f, 25.0f, 2.0f, "node_kw", 100, {}, "q_gen" },
+            { "pump_rate", "Water Pump Flow (L/min)", 0.0f, 100.0f, 35.0f, 1.0f, "link", 1009, {}, "p1" },
+            { "radiator_fan", "Radiator Cooling Fan (W/K)", 50.0f, 3000.0f, 600.0f, 50.0f, "link", 1011, {}, "p1" },
+            { "ambient_temp", "Ambient Environment Temp (C)", 5.0f, 48.0f, 25.0f, 1.0f, "node", 300, {}, "temp" }
+        };
+    }
 
     g_plot_active_nodes.clear();
     for (const auto& n : g_nodes) {
@@ -1049,10 +1251,82 @@ void LoadPreset(const std::string& key) {
     Log("Preset loaded: " + key, "success");
 }
 
+void UpdateThermostatBypassFlows() {
+    if (g_active_preset != "complete_loop") return;
+    
+    // Find the Thermostat Node (ID 500)
+    std::shared_ptr<DesktopNode> tstat = nullptr;
+    for (const auto& n : g_nodes) {
+        if (n->id == 500) {
+            tstat = n;
+            break;
+        }
+    }
+    
+    // Find the Water Pump Node speed (ID 400)
+    double speed_frac = 1.0;
+    for (const auto& n : g_nodes) {
+        if (n->id == 400) {
+            auto it = n->params.find("speed");
+            if (it != n->params.end()) {
+                speed_frac = it->second;
+            }
+            break;
+        }
+    }
+    
+    // Find the flow link from pump to Hose 5 (ID 1009) to get the base pump rate slider setting
+    double Q_pump_base = 35.0;
+    std::shared_ptr<DesktopLink> link_pump = nullptr;
+    for (const auto& l : g_links) {
+        if (l->id == 1009) {
+            link_pump = l;
+            Q_pump_base = l->p1;
+            break;
+        }
+    }
+    
+    double Q_pump = Q_pump_base * speed_frac;
+    
+    // Calculate thermostat open fraction based on its current temperature
+    double t_c = tstat ? tstat->temp : 25.0;
+    double open_temp = 82.0;
+    double full_open = 95.0;
+    if (tstat) {
+        auto it = tstat->params.find("open_temp");
+        if (it != tstat->params.end()) open_temp = it->second;
+        it = tstat->params.find("full_open");
+        if (it != tstat->params.end()) full_open = it->second;
+    }
+    
+    double open_frac = 0.0;
+    if (t_c > open_temp) {
+        if (t_c >= full_open) open_frac = 1.0;
+        else open_frac = (t_c - open_temp) / (full_open - open_temp);
+    }
+    
+    double Q_main = Q_pump * open_frac;
+    double Q_bypass = Q_pump * (1.0 - open_frac);
+    
+    // Update the flow rates of all loop links
+    for (auto& l : g_links) {
+        if (l->id == 1001 || l->id == 1002 || l->id == 1009 || l->id == 1010) {
+            l->p1 = Q_pump;
+        } else if (l->id == 1003 || l->id == 1004 || l->id == 1005 || l->id == 1006) {
+            l->p1 = Q_main;
+        } else if (l->id == 1007 || l->id == 1008) {
+            l->p1 = Q_bypass;
+        }
+    }
+}
+
 // Perform step on solver and update desktop coordinates temperatures
 void StepSimulation() {
     // Dynamic updates: apply slider values to nodes and links
     ApplySlidersToSystem();
+
+    // Update thermostat bypass split flow rates
+    UpdateThermostatBypassFlows();
 
     // Load state to solver
     SyncSystemWithSolver();
@@ -1078,17 +1352,22 @@ void StepSimulation() {
 
 // Steady State Solver trigger
 void SolveSteadyState() {
-    // Sync slider variables first
-    SyncSystemWithSolver();
-    
-    int iters = g_solver.solve_steady_state(1e-6, 2000);
-    
-    for (auto& n : g_nodes) {
-        n->temp = kToC(g_solver.get_node_temperature(n->id));
+    int total_iters = 0;
+    // Iterate to converge temperature-dependent thermostat valve split
+    for (int iter = 0; iter < 10; ++iter) {
+        ApplySlidersToSystem();
+        UpdateThermostatBypassFlows();
+        SyncSystemWithSolver();
+        total_iters += g_solver.solve_steady_state(1e-6, 500);
+        
+        // Pull temperatures back
+        for (auto& n : g_nodes) {
+            n->temp = kToC(g_solver.get_node_temperature(n->id));
+        }
     }
     
     UpdateHistory();
-    Log("Steady State Solver converged in " + std::to_string(iters) + " sweeps.", "success");
+    Log("Steady State Solver converged in " + std::to_string(total_iters) + " total sweeps.", "success");
 }
 
 // Export simulation time steps to CSV file
@@ -1318,11 +1597,13 @@ void RenderUI() {
     ImGui::SetNextItemWidth(170.0f);
     if (ImGui::BeginCombo("##presetCombo", g_active_preset == "vehicle" ? "Vehicle Cooling Loop" : 
                         (g_active_preset == "cpu" ? "CPU Cooler Assembly" : 
-                         (g_active_preset == "battery" ? "Li-Ion Battery Liquid" : "Double-Pane Window")))) {
+                         (g_active_preset == "battery" ? "Li-Ion Battery Liquid" : 
+                          (g_active_preset == "window" ? "Double-Pane Window" : "Complete Coolant Loop"))))) {
         if (ImGui::Selectable("Vehicle Cooling Loop", g_active_preset == "vehicle")) LoadPreset("vehicle");
         if (ImGui::Selectable("CPU Cooler Assembly", g_active_preset == "cpu")) LoadPreset("cpu");
         if (ImGui::Selectable("Li-Ion Battery Liquid Cooling", g_active_preset == "battery")) LoadPreset("battery");
         if (ImGui::Selectable("Double-Pane Window Insulation", g_active_preset == "window")) LoadPreset("window");
+        if (ImGui::Selectable("Complete Coolant Loop", g_active_preset == "complete_loop")) LoadPreset("complete_loop");
         ImGui::EndCombo();
     }
     ImGui::EndGroup();

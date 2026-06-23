@@ -12,13 +12,11 @@
 #include <algorithm>
 #include <unordered_map>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+
 
 // ─── DRAWING HELPERS ──────────────────────────────────────────────────────────
 
-static ImU32 TempToColor(double tempC) {
+static ImU32 TempToColor(double tempC) { 
     // Blue (cold) to Red (hot) over 0–120°C
     float t = (float)std::max(0.0, std::min(1.0, (tempC - 0.0) / 120.0));
     return IM_COL32(
@@ -34,7 +32,7 @@ static void DrawTempLabel(ImDrawList* dl, ImVec2 pos, double tempC) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%.1f°C", tempC);
     ImVec2 sz = ImGui::CalcTextSize(buf);
-    dl->AddText(ImVec2(pos.x - sz.x * 0.5f, pos.y), IM_COL32(220, 220, 220, 200), buf);
+    dl->AddText(ImVec2(pos.x - sz.x * 0.5f, pos.y), IM_COL32(220, 220, 220, 200), buf);// pos = position, sz = size of text and
 }
 
 // Draw port indicator circles around the component
@@ -60,8 +58,8 @@ void DrawPorts(ImDrawList* dl,
 
 // Engine Block — Rectangle with diagonal hatching inside + piston outlines
 static void DrawEngine(ImDrawList* dl, ImVec2 c, float z, bool sel, bool running, const std::vector<double>& temps) {
-    float W = 70 * z, H = 50 * z;
-    ImVec2 tl(c.x - W, c.y - H), br(c.x + W, c.y + H);
+    float W = 70 * z, H = 50 * z; // Width, Height of Engine Block
+    ImVec2 tl(c.x - W, c.y - H), br(c.x + W, c.y + H); // Top left, Bottom right
 
     // Body fill — orange-red tint
     ImU32 bodyFill = temps.empty() ? IM_COL32(40, 25, 10, 240) : TempToColor(temps[0]);
