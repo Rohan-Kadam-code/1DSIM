@@ -5,7 +5,7 @@ import math
 # Add src to python path
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from wrapper.thermal_solver import ThermalSystem, c_to_k, k_to_c
+from L4_sync.thermal_solver import ThermalSystem, c_to_k, k_to_c
 
 def test_complete_loop_preset():
     print("Running complete cooling loop preset simulation test...")

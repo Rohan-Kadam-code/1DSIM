@@ -1,7 +1,12 @@
--Isrc/core
+-Isrc/L1_physics
+-Isrc/L2_domain
+-Isrc/L3_state
+-Isrc/L5_ui/desktop
 -Ithirdparty
 -Ithirdparty/imgui
 -Ithirdparty/imgui/backends
 -Ithirdparty/implot
+-x
+c++
 -std=c++17
 -DNOMINMAX

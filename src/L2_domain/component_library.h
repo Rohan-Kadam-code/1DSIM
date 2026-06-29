@@ -165,6 +165,10 @@ const std::vector<ComponentDef>& GetComponentLibrary();
 const ComponentDef* GetCompDef(CompType type);
 const ComponentDef* GetCompDefById(const std::string& id);
 
+inline const ComponentDef* GetInstDef(const CompInstance& inst) {
+    return GetCompDef(inst.type);
+}
+
 // Port world-position helpers
 ImVec2 GetPortWorldPos(const CompInstance& inst, const ComponentDef& def, const std::string& portId, ImVec2 canvasOrigin, float zoom, ImVec2 scrolling);
 ImVec2 GetPortCanvasPos(const CompInstance& inst, const ComponentDef& def, const std::string& portId);

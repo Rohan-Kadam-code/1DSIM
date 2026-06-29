@@ -5,18 +5,17 @@ import os
 import sys
 import webbrowser
 
-# Add wrapper to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from wrapper.thermal_solver import ThermalSystem, c_to_k, k_to_c
+# Add src to path for L4_sync import
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from L4_sync.thermal_solver import ThermalSystem, c_to_k, k_to_c
 
 PORT = 8000
 sys_instance = None
 
 class ThermalSimRequestHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
-        # Set the directory for static file serving to src/gui/web
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.web_dir = os.path.join(base_dir, "web")
+        # Set the directory for static file serving to the web directory (same as server.py)
+        self.web_dir = os.path.dirname(os.path.abspath(__file__))
         super().__init__(*args, directory=self.web_dir, **kwargs)
 
     def do_POST(self):

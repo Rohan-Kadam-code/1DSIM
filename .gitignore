@@ -1,4 +1,5 @@
-# Compiled binaries
+# Build output
+build/
 *.exe
 *.dll
 *.obj
@@ -7,7 +8,7 @@
 *.lib
 *.ilk
 
-# Build cache
+# Python cache
 __pycache__/
 *.py[cod]
 *.pyo
@@ -20,7 +21,7 @@ __pycache__/
 *.vsidx
 .vs/
 
-# ImGui user config (generated at runtime)
+# ImGui runtime config
 imgui.ini
 
 # OS files

@@ -1,9 +1,7 @@
 // component_library.cpp
 // ICE Physical Component Library — P&ID schematic symbols + solver model mappings
 
-#define NOMINMAX
 #include "component_library.h"
-#include "../core/solver.h"  // for DesktopNode/DesktopLink forward declarations
 
 // ─── Include DesktopNode/DesktopLink (defined in main.cpp, declared here) ─────
 // We use a minimal re-declaration to avoid circular includes.

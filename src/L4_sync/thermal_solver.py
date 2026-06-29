@@ -7,9 +7,9 @@ class ThermalSolverError(Exception):
 
 class ThermalSolverWrapper:
     def __init__(self):
-        # Locate the DLL
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        dll_path = os.path.join(base_dir, "core", "solver.dll")
+        # Locate the DLL — project_root/build/solver.dll
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        dll_path = os.path.join(project_root, "build", "solver.dll")
         
         if not os.path.exists(dll_path):
             raise ThermalSolverError(f"C++ Solver DLL not found at: {dll_path}. Please build it first.")
